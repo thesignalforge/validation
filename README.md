@@ -215,10 +215,42 @@ $validator = new Validator([
 ['@filled']
 ```
 
-**Compound:**
+**Compound (multiple conditions):**
 ```php
-['and', [...], [...]]
-['or', [...], [...]]
+// All conditions must be true (AND)
+['and', ['type', '=', 'business'], ['country', '=', 'HR']]
+
+// At least one condition must be true (OR)
+['or', ['role', '=', 'admin'], ['role', '=', 'moderator']]
+
+// Nested conditions
+['and',
+    ['type', '=', 'business'],
+    ['or', ['country', '=', 'HR'], ['country', '=', 'SI']]
+]
+
+// Multiple conditions with self-referential checks
+['and', ['@filled'], ['@length', '>=', 5], ['@length', '<=', 100]]
+```
+
+**Full example with compound conditions:**
+```php
+$validator = new Validator([
+    'type' => ['required', ['in', ['personal', 'business']]],
+    'country' => ['required', 'string'],
+    'vat_number' => [
+        // Required only for EU businesses
+        ['when', ['and', ['type', '=', 'business'], ['country', 'in', ['HR', 'SI', 'AT', 'DE']]], [
+            'required', 'vat_eu',
+        ]],
+    ],
+    'company_name' => [
+        // Required for business OR if VAT number is provided
+        ['when', ['or', ['type', '=', 'business'], ['vat_number', 'filled']], [
+            'required', 'string', ['min', 2],
+        ]],
+    ],
+]);
 ```
 
 ## Wildcard Validation
