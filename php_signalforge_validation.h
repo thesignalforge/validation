@@ -67,6 +67,16 @@
 #define SF_REGEX_CACHE_INITIAL     8      /* Initial regex cache size */
 #define SF_HASH_INITIAL_SIZE       8      /* Default hashtable initial size */
 
+/*
+ * Security limits - prevent resource exhaustion and DoS attacks
+ */
+#define SF_MAX_CONDITION_PARSE_DEPTH   32     /* Maximum recursion depth for condition parsing */
+#define SF_MAX_CONDITION_EVAL_DEPTH    32     /* Maximum recursion depth for condition evaluation */
+#define SF_MAX_RULE_PARSE_DEPTH        32     /* Maximum recursion depth for rule parsing */
+#define SF_MAX_REGEX_PATTERN_LENGTH    8192   /* Maximum length of a regex pattern */
+#define SF_PCRE2_MATCH_LIMIT           100000 /* PCRE2 match limit to prevent ReDoS */
+#define SF_PCRE2_RECURSION_LIMIT       5000   /* PCRE2 recursion limit to prevent ReDoS */
+
 /* Backward compatibility alias */
 #define RULE_NAME_MAX_LENGTH SF_RULE_NAME_MAX_LENGTH
 
@@ -82,10 +92,17 @@ extern zend_class_entry *signalforge_invalid_rule_exception_ce;
 extern zend_object_handlers signalforge_validator_handlers;
 extern zend_object_handlers signalforge_validation_result_handlers;
 
-/* Cached regex structure */
+/*
+ * Cached regex structure.
+ *
+ * Contains compiled regex plus match context with ReDoS protection limits.
+ * The match_context includes pcre2_set_match_limit() and pcre2_set_recursion_limit()
+ * to prevent catastrophic backtracking from malicious patterns.
+ */
 typedef struct {
     pcre2_code *compiled;
     pcre2_match_data *match_data;
+    pcre2_match_context *match_context;  /* Contains ReDoS protection limits */
 } cached_regex_t;
 
 /* Validator object */

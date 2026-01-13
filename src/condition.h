@@ -64,16 +64,44 @@ typedef struct sf_condition_s {
     };
 } sf_condition_t;
 
-/* Parse a condition from PHP array */
+/*
+ * Parse a condition from PHP array.
+ *
+ * Security: Uses internal depth tracking to prevent stack overflow from
+ * deeply nested conditions. Returns NULL if depth exceeds SF_MAX_CONDITION_PARSE_DEPTH.
+ */
 sf_condition_t *sf_parse_condition(zval *condition_array);
 
-/* Evaluate a condition */
+/*
+ * Internal parsing function with explicit depth tracking.
+ * Users should call sf_parse_condition() which starts at depth 0.
+ */
+sf_condition_t *sf_parse_condition_with_depth(zval *condition_array, size_t depth);
+
+/*
+ * Evaluate a condition against data.
+ *
+ * Security: Uses internal depth tracking to prevent stack overflow from
+ * deeply nested conditions. Returns false (fails safe) if depth exceeded.
+ */
 zend_bool sf_evaluate_condition(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
     const char *current_field,
     signalforge_validator_t *validator
+);
+
+/*
+ * Internal evaluation function with explicit depth tracking.
+ */
+zend_bool sf_evaluate_condition_with_depth(
+    sf_condition_t *cond,
+    zval *current_value,
+    HashTable *all_data,
+    const char *current_field,
+    signalforge_validator_t *validator,
+    size_t depth
 );
 
 /* Free a condition */

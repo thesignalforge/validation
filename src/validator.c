@@ -12,13 +12,21 @@
 /* Object handlers */
 zend_object_handlers signalforge_validator_handlers;
 
-/* Free cached regex */
+/*
+ * Free cached regex structure.
+ *
+ * Properly frees all PCRE2 resources in correct order:
+ * match_data, match_context, then compiled code.
+ */
 static void free_cached_regex(zval *zv)
 {
     cached_regex_t *cached = Z_PTR_P(zv);
     if (cached) {
         if (cached->match_data) {
             pcre2_match_data_free(cached->match_data);
+        }
+        if (cached->match_context) {
+            pcre2_match_context_free(cached->match_context);
         }
         if (cached->compiled) {
             pcre2_code_free(cached->compiled);
@@ -63,7 +71,18 @@ static void signalforge_validator_free(zend_object *object)
     zend_object_std_dtor(&intern->std);
 }
 
-/* Get or compile a regex pattern */
+/*
+ * Get or compile a regex pattern with ReDoS protection.
+ *
+ * This function implements several security measures:
+ * 1. Caches compiled patterns to avoid repeated compilation cost
+ * 2. Strips PHP-style delimiters for convenience
+ * 3. Creates a match context with match_limit and recursion_limit
+ *    to prevent catastrophic backtracking (ReDoS)
+ *
+ * The match limits are enforced when pcre2_match() is called with
+ * the match_context. If limits are exceeded, the match fails safely.
+ */
 cached_regex_t *sf_get_or_compile_regex(
     signalforge_validator_t *validator,
     const char *pattern,
@@ -76,6 +95,17 @@ cached_regex_t *sf_get_or_compile_regex(
     cached = zend_hash_str_find_ptr(validator->regex_cache, pattern, pattern_len);
     if (cached) {
         return cached;
+    }
+
+    /*
+     * Security: Check pattern length limit.
+     * This is also checked during parsing, but we check here too
+     * in case patterns are provided through other code paths.
+     */
+    if (pattern_len > SF_MAX_REGEX_PATTERN_LENGTH) {
+        php_error_docref(NULL, E_WARNING,
+            "Regex pattern exceeds maximum length of %d", SF_MAX_REGEX_PATTERN_LENGTH);
+        return NULL;
     }
 
     /* Strip PHP-style delimiters: /pattern/flags or #pattern#flags etc. */
@@ -127,6 +157,24 @@ cached_regex_t *sf_get_or_compile_regex(
     cached = emalloc(sizeof(cached_regex_t));
     cached->compiled = compiled;
     cached->match_data = pcre2_match_data_create_from_pattern(compiled, NULL);
+
+    /*
+     * Security: Create match context with ReDoS protection limits.
+     *
+     * match_limit: Maximum number of internal match operations. Prevents
+     *              patterns like /(a+)+$/ from taking exponential time.
+     *
+     * recursion_limit: Maximum recursion depth for patterns that call
+     *                  themselves recursively. Prevents stack overflow.
+     *
+     * If these limits are exceeded, pcre2_match() returns PCRE2_ERROR_MATCHLIMIT
+     * or PCRE2_ERROR_RECURSIONLIMIT, and the match fails safely.
+     */
+    cached->match_context = pcre2_match_context_create(NULL);
+    if (cached->match_context) {
+        pcre2_set_match_limit(cached->match_context, SF_PCRE2_MATCH_LIMIT);
+        pcre2_set_recursion_limit(cached->match_context, SF_PCRE2_RECURSION_LIMIT);
+    }
 
     zend_hash_str_add_ptr(validator->regex_cache, pattern, pattern_len, cached);
     return cached;
@@ -379,11 +427,225 @@ static const zend_function_entry validator_methods[] = {
 };
 
 /*
+ * Deep copy a single parsed rule.
+ * Returns NULL on allocation failure.
+ */
+static sf_parsed_rule_t *sf_clone_parsed_rule(sf_parsed_rule_t *src);
+
+/*
+ * Deep copy a field rules structure.
+ * Returns NULL on allocation failure.
+ */
+static sf_field_rules_t *sf_clone_field_rules(sf_field_rules_t *src)
+{
+    if (!src) {
+        return NULL;
+    }
+
+    sf_field_rules_t *dst = ecalloc(1, sizeof(sf_field_rules_t));
+
+    if (src->field_name) {
+        dst->field_name = estrndup(src->field_name, src->field_len);
+        dst->field_len = src->field_len;
+    }
+
+    if (src->rules && src->rule_count > 0) {
+        dst->rules = ecalloc(src->rule_count, sizeof(sf_parsed_rule_t *));
+        dst->rule_count = 0;
+
+        for (size_t i = 0; i < src->rule_count; i++) {
+            sf_parsed_rule_t *cloned = sf_clone_parsed_rule(src->rules[i]);
+            if (!cloned) {
+                /* Cleanup on failure */
+                for (size_t j = 0; j < dst->rule_count; j++) {
+                    sf_free_parsed_rule(dst->rules[j]);
+                }
+                efree(dst->rules);
+                if (dst->field_name) {
+                    efree(dst->field_name);
+                }
+                efree(dst);
+                return NULL;
+            }
+            dst->rules[dst->rule_count++] = cloned;
+        }
+    }
+
+    return dst;
+}
+
+/*
+ * Deep copy a condition structure.
+ * Returns NULL on allocation failure.
+ */
+static sf_condition_t *sf_clone_condition(sf_condition_t *src)
+{
+    if (!src) {
+        return NULL;
+    }
+
+    sf_condition_t *dst = ecalloc(1, sizeof(sf_condition_t));
+    dst->kind = src->kind;
+
+    if (src->kind == COND_SIMPLE) {
+        dst->simple.subject = src->simple.subject;
+        dst->simple.op = src->simple.op;
+
+        if (src->simple.field_name) {
+            dst->simple.field_name = estrndup(src->simple.field_name, src->simple.field_len);
+            dst->simple.field_len = src->simple.field_len;
+        }
+
+        ZVAL_COPY(&dst->simple.value, &src->simple.value);
+    } else {
+        /* Compound condition (AND/OR) */
+        if (src->compound.count > 0 && src->compound.conditions) {
+            dst->compound.conditions = ecalloc(src->compound.count, sizeof(sf_condition_t *));
+            dst->compound.count = 0;
+
+            for (size_t i = 0; i < src->compound.count; i++) {
+                sf_condition_t *cloned = sf_clone_condition(src->compound.conditions[i]);
+                if (!cloned) {
+                    /* Cleanup on failure */
+                    for (size_t j = 0; j < dst->compound.count; j++) {
+                        sf_free_condition(dst->compound.conditions[j]);
+                    }
+                    efree(dst->compound.conditions);
+                    efree(dst);
+                    return NULL;
+                }
+                dst->compound.conditions[dst->compound.count++] = cloned;
+            }
+        }
+    }
+
+    return dst;
+}
+
+/*
+ * Deep copy a single parsed rule.
+ * Returns NULL on allocation failure.
+ */
+static sf_parsed_rule_t *sf_clone_parsed_rule(sf_parsed_rule_t *src)
+{
+    if (!src) {
+        return NULL;
+    }
+
+    sf_parsed_rule_t *dst = ecalloc(1, sizeof(sf_parsed_rule_t));
+    dst->type = src->type;
+
+    switch (src->type) {
+        case RULE_MIN:
+        case RULE_MAX:
+        case RULE_GT:
+        case RULE_GTE:
+        case RULE_LT:
+        case RULE_LTE:
+            dst->params.size.value = src->params.size.value;
+            break;
+
+        case RULE_BETWEEN:
+            dst->params.range.min = src->params.range.min;
+            dst->params.range.max = src->params.range.max;
+            break;
+
+        case RULE_REGEX:
+        case RULE_NOT_REGEX:
+            if (src->params.regex.pattern) {
+                dst->params.regex.pattern = estrndup(src->params.regex.pattern, src->params.regex.len);
+                dst->params.regex.len = src->params.regex.len;
+            }
+            break;
+
+        case RULE_STARTS_WITH:
+        case RULE_ENDS_WITH:
+        case RULE_CONTAINS:
+        case RULE_DATE_FORMAT:
+            if (src->params.string.str) {
+                dst->params.string.str = estrndup(src->params.string.str, src->params.string.len);
+                dst->params.string.len = src->params.string.len;
+            }
+            break;
+
+        case RULE_SAME:
+        case RULE_DIFFERENT:
+        case RULE_AFTER:
+        case RULE_BEFORE:
+        case RULE_AFTER_OR_EQUAL:
+        case RULE_BEFORE_OR_EQUAL:
+            if (src->params.field_ref.field) {
+                dst->params.field_ref.field = estrndup(src->params.field_ref.field, src->params.field_ref.len);
+                dst->params.field_ref.len = src->params.field_ref.len;
+            }
+            break;
+
+        case RULE_IN:
+        case RULE_NOT_IN:
+            if (src->params.in_list.values) {
+                ALLOC_HASHTABLE(dst->params.in_list.values);
+                zend_hash_init(dst->params.in_list.values,
+                    zend_hash_num_elements(src->params.in_list.values),
+                    NULL, ZVAL_PTR_DTOR, 0);
+                zend_hash_copy(dst->params.in_list.values, src->params.in_list.values, zval_add_ref);
+            }
+            break;
+
+        case RULE_WHEN:
+            dst->params.conditional.condition = sf_clone_condition(src->params.conditional.condition);
+
+            if (src->params.conditional.then_rules && src->params.conditional.then_count > 0) {
+                dst->params.conditional.then_rules = ecalloc(
+                    src->params.conditional.then_count, sizeof(sf_parsed_rule_t *));
+                dst->params.conditional.then_count = 0;
+
+                for (size_t i = 0; i < src->params.conditional.then_count; i++) {
+                    sf_parsed_rule_t *cloned = sf_clone_parsed_rule(src->params.conditional.then_rules[i]);
+                    if (!cloned) {
+                        goto when_cleanup;
+                    }
+                    dst->params.conditional.then_rules[dst->params.conditional.then_count++] = cloned;
+                }
+            }
+
+            if (src->params.conditional.else_rules && src->params.conditional.else_count > 0) {
+                dst->params.conditional.else_rules = ecalloc(
+                    src->params.conditional.else_count, sizeof(sf_parsed_rule_t *));
+                dst->params.conditional.else_count = 0;
+
+                for (size_t i = 0; i < src->params.conditional.else_count; i++) {
+                    sf_parsed_rule_t *cloned = sf_clone_parsed_rule(src->params.conditional.else_rules[i]);
+                    if (!cloned) {
+                        goto when_cleanup;
+                    }
+                    dst->params.conditional.else_rules[dst->params.conditional.else_count++] = cloned;
+                }
+            }
+            break;
+
+        when_cleanup:
+            sf_free_parsed_rule(dst);
+            return NULL;
+
+        default:
+            /* No parameters to copy */
+            break;
+    }
+
+    return dst;
+}
+
+/*
  * Clone handler for Validator objects.
  *
- * Creates a deep copy of the validator including its parsed rules and regex
- * cache. This ensures cloned validators are independent and don't share
- * mutable state with the original.
+ * Security fix: Creates a proper deep copy of the validator including its
+ * parsed rules. This prevents use-after-free if the original validator is
+ * destroyed while the clone is still in use.
+ *
+ * The regex cache is NOT copied - it will be rebuilt on demand during
+ * validation. This is safe because:
+ * 1. Regex cache is built lazily during pcre2_match calls
+ * 2. Each validator has its own independent regex cache
  */
 static zend_object *signalforge_validator_clone(zend_object *old_obj)
 {
@@ -396,16 +658,23 @@ static zend_object *signalforge_validator_clone(zend_object *old_obj)
     zend_objects_clone_members(&new_intern->std, old_obj);
 
     /*
-     * Note: We don't deep-copy the parsed rules as they are read-only after
-     * construction. The regex cache is also not copied - it will be rebuilt
-     * on demand. This is safe because:
-     * 1. Rules are never modified after parsing
-     * 2. Regex cache is populated lazily during validation
-     *
-     * For true isolation, we would need to deep-copy the rules structure,
-     * but that adds complexity with minimal benefit since validators are
-     * typically not cloned in practice.
+     * Deep copy the parsed rules to ensure the clone is fully independent.
+     * This prevents use-after-free vulnerabilities if the original validator
+     * is destroyed while the clone is still in use.
      */
+    if (old_intern->rules) {
+        ALLOC_HASHTABLE(new_intern->rules);
+        zend_hash_init(new_intern->rules, zend_hash_num_elements(old_intern->rules), NULL, NULL, 0);
+
+        zend_string *key;
+        sf_field_rules_t *fr;
+        ZEND_HASH_FOREACH_STR_KEY_PTR(old_intern->rules, key, fr) {
+            sf_field_rules_t *cloned_fr = sf_clone_field_rules(fr);
+            if (cloned_fr && key) {
+                zend_hash_add_ptr(new_intern->rules, key, cloned_fr);
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
 
     return &new_intern->std;
 }

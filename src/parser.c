@@ -134,9 +134,33 @@ sf_rule_type_t sf_get_rule_type(const char *name, size_t len)
     return RULE_UNKNOWN;
 }
 
-/* Parse a single rule from PHP value */
+/* Forward declaration for recursive parsing with depth tracking */
+static sf_parsed_rule_t *parse_single_rule_with_depth(zval *rule_zval, size_t depth);
+
+/*
+ * Parse a single rule from PHP value (public entry point).
+ * Delegates to depth-tracking version starting at depth 0.
+ */
 static sf_parsed_rule_t *parse_single_rule(zval *rule_zval)
 {
+    return parse_single_rule_with_depth(rule_zval, 0);
+}
+
+/*
+ * Parse a single rule from PHP value with depth tracking.
+ *
+ * Security: Prevents stack overflow from deeply nested 'when' rules by
+ * limiting recursion depth to SF_MAX_RULE_PARSE_DEPTH.
+ */
+static sf_parsed_rule_t *parse_single_rule_with_depth(zval *rule_zval, size_t depth)
+{
+    /* Security: Check recursion depth to prevent stack overflow */
+    if (depth > SF_MAX_RULE_PARSE_DEPTH) {
+        zend_throw_exception_ex(signalforge_invalid_rule_exception_ce, 0,
+            "Rule nesting depth exceeds maximum of %d", SF_MAX_RULE_PARSE_DEPTH);
+        return NULL;
+    }
+
     sf_parsed_rule_t *rule = ecalloc(1, sizeof(sf_parsed_rule_t));
 
     if (Z_TYPE_P(rule_zval) == IS_STRING) {
@@ -211,6 +235,18 @@ static sf_parsed_rule_t *parse_single_rule(zval *rule_zval)
                 if (!pattern || Z_TYPE_P(pattern) != IS_STRING) {
                     zend_throw_exception_ex(signalforge_invalid_rule_exception_ce, 0,
                         "Rule '%s' requires a regex pattern string", ZSTR_VAL(name));
+                    efree(rule);
+                    return NULL;
+                }
+                /*
+                 * Security: Limit regex pattern length to prevent resource exhaustion
+                 * from extremely long patterns that could cause excessive compilation
+                 * time or memory usage.
+                 */
+                if (Z_STRLEN_P(pattern) > SF_MAX_REGEX_PATTERN_LENGTH) {
+                    zend_throw_exception_ex(signalforge_invalid_rule_exception_ce, 0,
+                        "Regex pattern exceeds maximum length of %d characters",
+                        SF_MAX_REGEX_PATTERN_LENGTH);
                     efree(rule);
                     return NULL;
                 }
@@ -295,7 +331,7 @@ static sf_parsed_rule_t *parse_single_rule(zval *rule_zval)
                     return NULL;
                 }
 
-                /* Parse then rules */
+                /* Parse then rules - use depth-incremented recursive call */
                 HashTable *then_arr = Z_ARRVAL_P(then_zval);
                 size_t then_count = zend_hash_num_elements(then_arr);
                 rule->params.conditional.then_rules = ecalloc(then_count, sizeof(sf_parsed_rule_t *));
@@ -303,7 +339,8 @@ static sf_parsed_rule_t *parse_single_rule(zval *rule_zval)
 
                 zval *then_rule;
                 ZEND_HASH_FOREACH_VAL(then_arr, then_rule) {
-                    sf_parsed_rule_t *parsed = parse_single_rule(then_rule);
+                    /* Recursive call with incremented depth */
+                    sf_parsed_rule_t *parsed = parse_single_rule_with_depth(then_rule, depth + 1);
                     if (!parsed) {
                         /* Cleanup and return */
                         for (size_t i = 0; i < rule->params.conditional.then_count; i++) {
@@ -328,7 +365,8 @@ static sf_parsed_rule_t *parse_single_rule(zval *rule_zval)
 
                     zval *else_rule;
                     ZEND_HASH_FOREACH_VAL(else_arr, else_rule) {
-                        sf_parsed_rule_t *parsed = parse_single_rule(else_rule);
+                        /* Recursive call with incremented depth */
+                        sf_parsed_rule_t *parsed = parse_single_rule_with_depth(else_rule, depth + 1);
                         if (!parsed) {
                             /* Cleanup */
                             for (size_t i = 0; i < rule->params.conditional.then_count; i++) {

@@ -78,9 +78,31 @@ static sf_condition_op_t parse_operator(const char *op, size_t len)
     return COND_OP_EQ; /* Default */
 }
 
-/* Parse a condition from PHP array */
+/*
+ * Parse a condition from PHP array (public API).
+ * Delegates to depth-tracking version starting at depth 0.
+ */
 sf_condition_t *sf_parse_condition(zval *condition_array)
 {
+    return sf_parse_condition_with_depth(condition_array, 0);
+}
+
+/*
+ * Parse a condition from PHP array with depth tracking.
+ *
+ * Security: Prevents stack overflow from maliciously crafted deeply nested
+ * conditions by limiting recursion depth to SF_MAX_CONDITION_PARSE_DEPTH.
+ * Returns NULL if depth is exceeded.
+ */
+sf_condition_t *sf_parse_condition_with_depth(zval *condition_array, size_t depth)
+{
+    /* Security: Check recursion depth to prevent stack overflow */
+    if (depth > SF_MAX_CONDITION_PARSE_DEPTH) {
+        php_error_docref(NULL, E_WARNING,
+            "Condition nesting depth exceeds maximum of %d", SF_MAX_CONDITION_PARSE_DEPTH);
+        return NULL;
+    }
+
     if (Z_TYPE_P(condition_array) != IS_ARRAY) {
         return NULL;
     }
@@ -108,7 +130,8 @@ sf_condition_t *sf_parse_condition(zval *condition_array)
         for (size_t i = 1; i <= count; i++) {
             zval *sub = zend_hash_index_find(arr, i);
             if (sub && Z_TYPE_P(sub) == IS_ARRAY) {
-                sf_condition_t *sub_cond = sf_parse_condition(sub);
+                /* Recursive call with incremented depth */
+                sf_condition_t *sub_cond = sf_parse_condition_with_depth(sub, depth + 1);
                 if (sub_cond) {
                     cond->compound.conditions[cond->compound.count++] = sub_cond;
                 }
@@ -126,7 +149,8 @@ sf_condition_t *sf_parse_condition(zval *condition_array)
         for (size_t i = 1; i <= count; i++) {
             zval *sub = zend_hash_index_find(arr, i);
             if (sub && Z_TYPE_P(sub) == IS_ARRAY) {
-                sf_condition_t *sub_cond = sf_parse_condition(sub);
+                /* Recursive call with incremented depth */
+                sf_condition_t *sub_cond = sf_parse_condition_with_depth(sub, depth + 1);
                 if (sub_cond) {
                     cond->compound.conditions[cond->compound.count++] = sub_cond;
                 }
@@ -324,6 +348,11 @@ static zend_bool evaluate_simple_condition(
                     return 0;
                 }
 
+                /*
+                 * Use match_context with ReDoS protection limits.
+                 * If limits are exceeded, rc will be PCRE2_ERROR_MATCHLIMIT
+                 * or PCRE2_ERROR_RECURSIONLIMIT, and the condition fails safe.
+                 */
                 int rc = pcre2_match(
                     cached->compiled,
                     (PCRE2_SPTR)Z_STRVAL_P(current_value),
@@ -331,7 +360,7 @@ static zend_bool evaluate_simple_condition(
                     0,
                     0,
                     cached->match_data,
-                    NULL
+                    cached->match_context
                 );
 
                 return rc >= 0;
@@ -463,7 +492,10 @@ static zend_bool evaluate_simple_condition(
     return result;
 }
 
-/* Evaluate a condition */
+/*
+ * Evaluate a condition (public API).
+ * Delegates to depth-tracking version starting at depth 0.
+ */
 zend_bool sf_evaluate_condition(
     sf_condition_t *cond,
     zval *current_value,
@@ -472,8 +504,34 @@ zend_bool sf_evaluate_condition(
     signalforge_validator_t *validator
 )
 {
+    return sf_evaluate_condition_with_depth(cond, current_value, all_data, current_field, validator, 0);
+}
+
+/*
+ * Evaluate a condition with depth tracking.
+ *
+ * Security: Prevents stack overflow from deeply nested conditions by limiting
+ * recursion depth. Returns 0 (fails safe) if depth exceeded - this means
+ * conditional validation rules will not apply if conditions are too deep.
+ */
+zend_bool sf_evaluate_condition_with_depth(
+    sf_condition_t *cond,
+    zval *current_value,
+    HashTable *all_data,
+    const char *current_field,
+    signalforge_validator_t *validator,
+    size_t depth
+)
+{
     if (!cond) {
         return 1;
+    }
+
+    /* Security: Check recursion depth to prevent stack overflow */
+    if (depth > SF_MAX_CONDITION_EVAL_DEPTH) {
+        php_error_docref(NULL, E_WARNING,
+            "Condition evaluation depth exceeds maximum of %d", SF_MAX_CONDITION_EVAL_DEPTH);
+        return 0; /* Fail safe - condition not met */
     }
 
     switch (cond->kind) {
@@ -482,7 +540,7 @@ zend_bool sf_evaluate_condition(
 
         case COND_AND: {
             for (size_t i = 0; i < cond->compound.count; i++) {
-                if (!sf_evaluate_condition(cond->compound.conditions[i], current_value, all_data, current_field, validator)) {
+                if (!sf_evaluate_condition_with_depth(cond->compound.conditions[i], current_value, all_data, current_field, validator, depth + 1)) {
                     return 0;
                 }
             }
@@ -491,7 +549,7 @@ zend_bool sf_evaluate_condition(
 
         case COND_OR: {
             for (size_t i = 0; i < cond->compound.count; i++) {
-                if (sf_evaluate_condition(cond->compound.conditions[i], current_value, all_data, current_field, validator)) {
+                if (sf_evaluate_condition_with_depth(cond->compound.conditions[i], current_value, all_data, current_field, validator, depth + 1)) {
                     return 1;
                 }
             }

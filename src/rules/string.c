@@ -127,6 +127,11 @@ sf_rule_result_t sf_rule_regex(sf_validation_context_t *ctx, sf_parsed_rule_t *r
         return RULE_FAIL;
     }
 
+    /*
+     * Security: Use match_context with ReDoS protection limits.
+     * If limits are exceeded, rc will be negative (PCRE2_ERROR_MATCHLIMIT
+     * or PCRE2_ERROR_RECURSIONLIMIT), and the regex validation fails safely.
+     */
     int rc = pcre2_match(
         cached->compiled,
         (PCRE2_SPTR)Z_STRVAL_P(ctx->value),
@@ -134,7 +139,7 @@ sf_rule_result_t sf_rule_regex(sf_validation_context_t *ctx, sf_parsed_rule_t *r
         0,
         0,
         cached->match_data,
-        NULL
+        cached->match_context
     );
 
     if (rc < 0) {
@@ -166,6 +171,9 @@ sf_rule_result_t sf_rule_not_regex(sf_validation_context_t *ctx, sf_parsed_rule_
         return RULE_PASS;  /* Invalid regex doesn't match */
     }
 
+    /*
+     * Security: Use match_context with ReDoS protection limits.
+     */
     int rc = pcre2_match(
         cached->compiled,
         (PCRE2_SPTR)Z_STRVAL_P(ctx->value),
@@ -173,7 +181,7 @@ sf_rule_result_t sf_rule_not_regex(sf_validation_context_t *ctx, sf_parsed_rule_
         0,
         0,
         cached->match_data,
-        NULL
+        cached->match_context
     );
 
     if (rc >= 0) {
@@ -184,7 +192,20 @@ sf_rule_result_t sf_rule_not_regex(sf_validation_context_t *ctx, sf_parsed_rule_
     return RULE_PASS;
 }
 
-/* alpha - Only alphabetic characters */
+/*
+ * Validate alpha rules with proper UTF-8 handling.
+ *
+ * Security: These functions first validate UTF-8 encoding before
+ * checking character classes. Invalid UTF-8 is rejected to prevent:
+ * 1. Misinterpreting malformed sequences as valid characters
+ * 2. Potential security bypasses using overlong encodings
+ * 3. Denial of service via malformed input
+ *
+ * The UTF-8 validation is performed once upfront for efficiency,
+ * then we iterate through valid UTF-8 characters.
+ */
+
+/* alpha - Only alphabetic characters (ASCII + valid UTF-8 letters) */
 sf_rule_result_t sf_rule_alpha(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -199,11 +220,44 @@ sf_rule_result_t sf_rule_alpha(sf_validation_context_t *ctx, sf_parsed_rule_t *r
     const char *str = Z_STRVAL_P(ctx->value);
     size_t len = Z_STRLEN_P(ctx->value);
 
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)str[i];
-        /* Allow UTF-8 multi-byte characters and ASCII letters */
-        if (c >= 0x80) continue;  /* UTF-8 continuation or lead byte */
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+    /*
+     * Security: Validate UTF-8 encoding before processing.
+     * Invalid UTF-8 sequences could be crafted to bypass validation
+     * (e.g., overlong encodings, invalid continuation bytes).
+     */
+    if (!sf_utf8_is_valid(str, len)) {
+        sf_add_error(ctx, "validation.alpha");
+        return RULE_FAIL;
+    }
+
+    /*
+     * Now iterate through the validated UTF-8 string.
+     * Since UTF-8 is valid, we can safely skip multi-byte sequences.
+     */
+    const unsigned char *p = (const unsigned char *)str;
+    const unsigned char *end = p + len;
+
+    while (p < end) {
+        unsigned char c = *p;
+
+        if (c < 0x80) {
+            /* ASCII character - must be a letter */
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+                sf_add_error(ctx, "validation.alpha");
+                return RULE_FAIL;
+            }
+            p++;
+        } else if ((c & 0xE0) == 0xC0) {
+            /* 2-byte UTF-8 sequence - assume valid Unicode letter */
+            p += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            /* 3-byte UTF-8 sequence */
+            p += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            /* 4-byte UTF-8 sequence */
+            p += 4;
+        } else {
+            /* Should not reach here since UTF-8 was validated */
             sf_add_error(ctx, "validation.alpha");
             return RULE_FAIL;
         }
@@ -227,10 +281,32 @@ sf_rule_result_t sf_rule_alpha_num(sf_validation_context_t *ctx, sf_parsed_rule_
     const char *str = Z_STRVAL_P(ctx->value);
     size_t len = Z_STRLEN_P(ctx->value);
 
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)str[i];
-        if (c >= 0x80) continue;  /* UTF-8 */
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+    /* Security: Validate UTF-8 encoding first */
+    if (!sf_utf8_is_valid(str, len)) {
+        sf_add_error(ctx, "validation.alpha_num");
+        return RULE_FAIL;
+    }
+
+    const unsigned char *p = (const unsigned char *)str;
+    const unsigned char *end = p + len;
+
+    while (p < end) {
+        unsigned char c = *p;
+
+        if (c < 0x80) {
+            /* ASCII - must be alphanumeric */
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+                sf_add_error(ctx, "validation.alpha_num");
+                return RULE_FAIL;
+            }
+            p++;
+        } else if ((c & 0xE0) == 0xC0) {
+            p += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            p += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            p += 4;
+        } else {
             sf_add_error(ctx, "validation.alpha_num");
             return RULE_FAIL;
         }
@@ -254,11 +330,33 @@ sf_rule_result_t sf_rule_alpha_dash(sf_validation_context_t *ctx, sf_parsed_rule
     const char *str = Z_STRVAL_P(ctx->value);
     size_t len = Z_STRLEN_P(ctx->value);
 
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)str[i];
-        if (c >= 0x80) continue;  /* UTF-8 */
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+    /* Security: Validate UTF-8 encoding first */
+    if (!sf_utf8_is_valid(str, len)) {
+        sf_add_error(ctx, "validation.alpha_dash");
+        return RULE_FAIL;
+    }
+
+    const unsigned char *p = (const unsigned char *)str;
+    const unsigned char *end = p + len;
+
+    while (p < end) {
+        unsigned char c = *p;
+
+        if (c < 0x80) {
+            /* ASCII - must be alphanumeric, dash, or underscore */
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_')) {
+                sf_add_error(ctx, "validation.alpha_dash");
+                return RULE_FAIL;
+            }
+            p++;
+        } else if ((c & 0xE0) == 0xC0) {
+            p += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            p += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            p += 4;
+        } else {
             sf_add_error(ctx, "validation.alpha_dash");
             return RULE_FAIL;
         }

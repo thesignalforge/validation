@@ -133,18 +133,51 @@ sf_rule_result_t sf_rule_different(sf_validation_context_t *ctx, sf_parsed_rule_
     return RULE_PASS;
 }
 
-/* confirmed - Field must have a matching {field}_confirmation field */
+/*
+ * confirmed - Field must have a matching {field}_confirmation field.
+ *
+ * Security: Checks for integer overflow when computing the confirmation
+ * field name length. This prevents potential buffer overflow attacks
+ * with extremely long field names.
+ */
 sf_rule_result_t sf_rule_confirmed(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
         return RULE_PASS;
     }
 
-    /* Build confirmation field name: {field}_confirmation */
-    size_t confirmation_len = ctx->field_len + 13;  /* "_confirmation" is 13 chars */
+    /*
+     * Security: Check for integer overflow before allocation.
+     *
+     * The confirmation field name is: {field_name}_confirmation
+     * We need: field_len + strlen("_confirmation") + 1 (null terminator)
+     *
+     * Check that adding these values won't overflow size_t.
+     */
+    const size_t suffix_len = 13;  /* "_confirmation" length */
+
+    /* Check for overflow: field_len + suffix_len + 1 must not overflow */
+    if (ctx->field_len > SIZE_MAX - suffix_len - 1) {
+        /* Field name is impossibly long - fail validation */
+        sf_add_error(ctx, "validation.confirmed");
+        return RULE_FAIL;
+    }
+
+    size_t confirmation_len = ctx->field_len + suffix_len;
+
+    /*
+     * Additional sanity check: don't allocate unreasonably large buffers.
+     * This also protects against DoS via memory exhaustion.
+     */
+    if (confirmation_len > SF_FIELD_NAME_MAX_LENGTH + suffix_len) {
+        sf_add_error(ctx, "validation.confirmed");
+        return RULE_FAIL;
+    }
+
+    /* Safe to allocate now */
     char *confirmation_field = emalloc(confirmation_len + 1);
     memcpy(confirmation_field, ctx->field_name, ctx->field_len);
-    memcpy(confirmation_field + ctx->field_len, "_confirmation", 13);
+    memcpy(confirmation_field + ctx->field_len, "_confirmation", suffix_len);
     confirmation_field[confirmation_len] = '\0';
 
     zval *confirmation_value = sf_get_nested_value(
