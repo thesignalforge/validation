@@ -8,10 +8,21 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-/* Fast email validation */
+/*
+ * Fast email validation following RFC 5321 length limits.
+ *
+ * This performs structural validation only (checking for @ and .) without
+ * full RFC 5322 compliance. For production use with strict requirements,
+ * consider using filter_var() in PHP userland as a secondary check.
+ *
+ * Length limits per RFC 5321:
+ * - Total: 254 characters
+ * - Local part: 64 characters
+ * - Domain: 253 characters
+ */
 static zend_bool validate_email_fast(const char *email, size_t len)
 {
-    if (len < 3 || len > 254) {
+    if (len < SF_EMAIL_MIN_LENGTH || len > SF_EMAIL_MAX_LENGTH) {
         return 0;
     }
 
@@ -20,16 +31,16 @@ static zend_bool validate_email_fast(const char *email, size_t len)
         return 0;
     }
 
-    size_t local_len = at - email;
+    size_t local_len = (size_t)(at - email);
     size_t domain_len = len - local_len - 1;
 
     /* Local part: 1-64 chars */
-    if (local_len < 1 || local_len > 64) {
+    if (local_len < 1 || local_len > SF_EMAIL_LOCAL_MAX_LENGTH) {
         return 0;
     }
 
     /* Domain: 1-253 chars, must contain dot */
-    if (domain_len < 1 || domain_len > 253) {
+    if (domain_len < 1 || domain_len > SF_EMAIL_DOMAIN_MAX_LENGTH) {
         return 0;
     }
 
@@ -120,7 +131,12 @@ sf_rule_result_t sf_rule_ip(sf_validation_context_t *ctx, sf_parsed_rule_t *rule
     return RULE_FAIL;
 }
 
-/* uuid - Valid UUID */
+/*
+ * UUID validation (RFC 4122 format).
+ *
+ * Validates the standard UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+ * Accepts both uppercase and lowercase hex digits.
+ */
 sf_rule_result_t sf_rule_uuid(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -136,7 +152,7 @@ sf_rule_result_t sf_rule_uuid(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     size_t len = Z_STRLEN_P(ctx->value);
 
     /* UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars) */
-    if (len != 36) {
+    if (len != SF_UUID_LENGTH) {
         sf_add_error(ctx, "validation.uuid");
         return RULE_FAIL;
     }
@@ -161,7 +177,12 @@ sf_rule_result_t sf_rule_uuid(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     return RULE_PASS;
 }
 
-/* json - Valid JSON string */
+/*
+ * Validate that a string contains valid JSON.
+ *
+ * Uses PHP's json_decode() and json_last_error() to validate. This approach
+ * ensures consistency with PHP's own JSON parsing behavior.
+ */
 sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -184,6 +205,7 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     zval_ptr_dtor(&params[0]);
 
     if (result != SUCCESS) {
+        zval_ptr_dtor(&retval);
         sf_add_error(ctx, "validation.json");
         return RULE_FAIL;
     }
@@ -194,7 +216,8 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     call_user_function(NULL, NULL, &error_func, &error_retval, 0, NULL);
     zval_ptr_dtor(&error_func);
 
-    zend_long error_code = Z_LVAL(error_retval);
+    zend_long error_code = zval_get_long(&error_retval);
+    zval_ptr_dtor(&error_retval);
     zval_ptr_dtor(&retval);
 
     if (error_code != 0) {  /* JSON_ERROR_NONE = 0 */

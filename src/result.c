@@ -158,6 +158,45 @@ static const zend_function_entry validation_result_methods[] = {
     PHP_FE_END
 };
 
+/*
+ * Clone handler for ValidationResult objects.
+ *
+ * Creates a deep copy including errors and validated data hashtables.
+ */
+static zend_object *signalforge_validation_result_clone(zend_object *old_obj)
+{
+    signalforge_validation_result_t *old_intern = signalforge_validation_result_from_obj(old_obj);
+    signalforge_validation_result_t *new_intern;
+
+    new_intern = signalforge_validation_result_from_obj(
+        signalforge_validation_result_create(old_obj->ce)
+    );
+
+    /* Clone standard object properties */
+    zend_objects_clone_members(&new_intern->std, old_obj);
+
+    /* Copy scalar members */
+    new_intern->is_valid = old_intern->is_valid;
+
+    /* Deep copy errors hashtable */
+    if (old_intern->errors) {
+        ALLOC_HASHTABLE(new_intern->errors);
+        zend_hash_init(new_intern->errors, zend_hash_num_elements(old_intern->errors),
+            NULL, ZVAL_PTR_DTOR, 0);
+        zend_hash_copy(new_intern->errors, old_intern->errors, zval_add_ref);
+    }
+
+    /* Deep copy validated hashtable */
+    if (old_intern->validated) {
+        ALLOC_HASHTABLE(new_intern->validated);
+        zend_hash_init(new_intern->validated, zend_hash_num_elements(old_intern->validated),
+            NULL, ZVAL_PTR_DTOR, 0);
+        zend_hash_copy(new_intern->validated, old_intern->validated, zval_add_ref);
+    }
+
+    return &new_intern->std;
+}
+
 /* Register ValidationResult class */
 void signalforge_register_result_class(void)
 {
@@ -169,4 +208,5 @@ void signalforge_register_result_class(void)
     memcpy(&signalforge_validation_result_handlers, &std_object_handlers, sizeof(zend_object_handlers));
     signalforge_validation_result_handlers.offset = XtOffsetOf(signalforge_validation_result_t, std);
     signalforge_validation_result_handlers.free_obj = signalforge_validation_result_free;
+    signalforge_validation_result_handlers.clone_obj = signalforge_validation_result_clone;
 }

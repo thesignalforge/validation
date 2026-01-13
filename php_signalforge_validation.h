@@ -1,6 +1,27 @@
 /*
  * Signalforge Validation - PHP C Extension
  * High-performance input validation for PHP 8.2+
+ *
+ * This extension provides a Laravel-compatible validation API implemented in C
+ * for maximum performance. It supports:
+ * - Type validation (string, integer, numeric, boolean, array)
+ * - String validation (min, max, regex, alpha, email, url, etc.)
+ * - Numeric comparison (gt, gte, lt, lte)
+ * - Array validation (distinct, wildcard patterns)
+ * - Conditional validation (when clauses)
+ * - Regional formats (OIB, IBAN, EU VAT)
+ *
+ * Thread Safety:
+ * - Fully ZTS-compatible using proper TSRM mechanisms
+ * - Per-request regex caching stored in validator objects
+ *
+ * Memory Management:
+ * - All allocations use Zend Memory Manager (emalloc/efree)
+ * - Proper cleanup in all error paths
+ * - Reference counting for zvals follows PHP conventions
+ *
+ * Copyright (c) Signalforge
+ * Licensed under the MIT License
  */
 
 #ifndef PHP_SIGNALFORGE_VALIDATION_H
@@ -20,10 +41,34 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 
+/*
+ * Extension metadata constants
+ */
 #define PHP_SIGNALFORGE_VALIDATION_VERSION "1.0.0"
 #define PHP_SIGNALFORGE_VALIDATION_EXTNAME "signalforge_validation"
 
-#define RULE_NAME_MAX_LENGTH 1024
+/*
+ * Validation limits - these prevent denial-of-service via resource exhaustion
+ */
+#define SF_RULE_NAME_MAX_LENGTH    1024   /* Maximum length of a rule name */
+#define SF_FIELD_NAME_MAX_LENGTH   4096   /* Maximum length of a field path */
+#define SF_EMAIL_MIN_LENGTH        3      /* Minimum valid email: a@b */
+#define SF_EMAIL_MAX_LENGTH        254    /* RFC 5321 limit */
+#define SF_EMAIL_LOCAL_MAX_LENGTH  64     /* RFC 5321 local part limit */
+#define SF_EMAIL_DOMAIN_MAX_LENGTH 253    /* RFC 5321 domain limit */
+#define SF_PHONE_MIN_DIGITS        7      /* Minimum phone digits */
+#define SF_PHONE_MAX_LENGTH        20     /* Maximum phone string length */
+#define SF_UUID_LENGTH             36     /* UUID string length */
+#define SF_OIB_LENGTH              11     /* Croatian OIB length */
+#define SF_IBAN_MIN_LENGTH         15     /* Minimum IBAN length */
+#define SF_IBAN_MAX_LENGTH         34     /* Maximum IBAN length */
+#define SF_VAT_EU_MIN_LENGTH       4      /* Minimum EU VAT length */
+#define SF_VAT_EU_MAX_LENGTH       14     /* Maximum EU VAT length */
+#define SF_REGEX_CACHE_INITIAL     8      /* Initial regex cache size */
+#define SF_HASH_INITIAL_SIZE       8      /* Default hashtable initial size */
+
+/* Backward compatibility alias */
+#define RULE_NAME_MAX_LENGTH SF_RULE_NAME_MAX_LENGTH
 
 extern zend_module_entry signalforge_validation_module_entry;
 #define phpext_signalforge_validation_ptr &signalforge_validation_module_entry

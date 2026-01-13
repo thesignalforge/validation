@@ -321,7 +321,13 @@ sf_rule_result_t sf_rule_uppercase(sf_validation_context_t *ctx, sf_parsed_rule_
     return RULE_PASS;
 }
 
-/* starts_with - Must start with given string */
+/*
+ * starts_with - String must start with the given prefix.
+ *
+ * Edge cases:
+ * - Empty prefix: always passes (everything starts with empty string)
+ * - Prefix longer than value: fails
+ */
 sf_rule_result_t sf_rule_starts_with(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -331,6 +337,11 @@ sf_rule_result_t sf_rule_starts_with(sf_validation_context_t *ctx, sf_parsed_rul
     if (!ctx->value || Z_TYPE_P(ctx->value) != IS_STRING) {
         sf_add_error(ctx, "validation.starts_with");
         return RULE_FAIL;
+    }
+
+    /* Empty prefix always matches */
+    if (rule->params.string.len == 0) {
+        return RULE_PASS;
     }
 
     const char *str = Z_STRVAL_P(ctx->value);
@@ -345,7 +356,13 @@ sf_rule_result_t sf_rule_starts_with(sf_validation_context_t *ctx, sf_parsed_rul
     return RULE_PASS;
 }
 
-/* ends_with - Must end with given string */
+/*
+ * ends_with - String must end with the given suffix.
+ *
+ * Edge cases:
+ * - Empty suffix: always passes
+ * - Suffix longer than value: fails
+ */
 sf_rule_result_t sf_rule_ends_with(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -355,6 +372,11 @@ sf_rule_result_t sf_rule_ends_with(sf_validation_context_t *ctx, sf_parsed_rule_
     if (!ctx->value || Z_TYPE_P(ctx->value) != IS_STRING) {
         sf_add_error(ctx, "validation.ends_with");
         return RULE_FAIL;
+    }
+
+    /* Empty suffix always matches */
+    if (rule->params.string.len == 0) {
+        return RULE_PASS;
     }
 
     const char *str = Z_STRVAL_P(ctx->value);
@@ -369,7 +391,13 @@ sf_rule_result_t sf_rule_ends_with(sf_validation_context_t *ctx, sf_parsed_rule_
     return RULE_PASS;
 }
 
-/* contains - Must contain given string */
+/*
+ * contains - String must contain the given substring.
+ *
+ * Edge cases:
+ * - Empty needle: always passes (empty string is contained everywhere)
+ * - Needle longer than haystack: fails
+ */
 sf_rule_result_t sf_rule_contains(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -381,6 +409,11 @@ sf_rule_result_t sf_rule_contains(sf_validation_context_t *ctx, sf_parsed_rule_t
         return RULE_FAIL;
     }
 
+    /* Empty needle always matches */
+    if (rule->params.string.len == 0) {
+        return RULE_PASS;
+    }
+
     const char *str = Z_STRVAL_P(ctx->value);
     size_t len = Z_STRLEN_P(ctx->value);
 
@@ -389,7 +422,7 @@ sf_rule_result_t sf_rule_contains(sf_validation_context_t *ctx, sf_parsed_rule_t
         return RULE_FAIL;
     }
 
-    /* Simple substring search */
+    /* Simple substring search using memmem for binary safety */
     const char *found = memmem(str, len, rule->params.string.str, rule->params.string.len);
     if (!found) {
         sf_add_error(ctx, "validation.contains");

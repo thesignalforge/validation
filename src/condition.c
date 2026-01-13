@@ -1,8 +1,17 @@
 /*
  * Condition evaluation
+ *
+ * This module handles the evaluation of conditional validation rules.
+ * Conditions can be simple (field comparisons) or compound (AND/OR).
+ *
+ * Supported condition types:
+ * - Simple: ['field', 'operator', 'value'] e.g., ['status', '=', 'active']
+ * - Self-referential: ['@length', '>', 5] - check current field properties
+ * - Compound: ['and', cond1, cond2, ...] or ['or', cond1, cond2, ...]
  */
 
 #include "condition.h"
+#include "validator.h"
 #include "util/utf8.h"
 
 /* Check if a value is considered "empty" */
@@ -223,7 +232,16 @@ static zend_bool value_in_array(zval *value, zval *array_val)
     return 0;
 }
 
-/* Evaluate a simple condition */
+/*
+ * Evaluate a simple condition against current value and data context.
+ *
+ * This function handles various condition types including self-referential
+ * conditions (@length, @value, @type) and cross-field comparisons.
+ *
+ * Memory management: subject_value is used as a temporary zval for computed
+ * values. We track whether it needs cleanup with needs_cleanup flag to ensure
+ * proper resource management.
+ */
 static zend_bool evaluate_simple_condition(
     sf_condition_t *cond,
     zval *current_value,
@@ -234,6 +252,9 @@ static zend_bool evaluate_simple_condition(
 {
     zval subject_value;
     zval *subject_ptr = NULL;
+    zend_bool needs_cleanup = 0; /* Track if subject_value needs zval_ptr_dtor */
+
+    ZVAL_UNDEF(&subject_value);
 
     switch (cond->simple.subject) {
         case SUBJECT_SELF_LENGTH: {
@@ -270,6 +291,7 @@ static zend_bool evaluate_simple_condition(
                 }
             }
             subject_ptr = &subject_value;
+            needs_cleanup = 1;
             break;
         }
 
@@ -287,39 +309,67 @@ static zend_bool evaluate_simple_condition(
                 return 0;
             }
 
-            /* Use PHP's preg_match */
-            pcre2_code *re;
-            PCRE2_SIZE erroffset;
-            int errcode;
+            /*
+             * Use the validator's regex cache for efficiency.
+             * If no validator context is available, fall back to one-time compilation.
+             */
+            if (validator) {
+                cached_regex_t *cached = sf_get_or_compile_regex(
+                    validator,
+                    Z_STRVAL(cond->simple.value),
+                    Z_STRLEN(cond->simple.value)
+                );
 
-            re = pcre2_compile(
-                (PCRE2_SPTR)Z_STRVAL(cond->simple.value),
-                Z_STRLEN(cond->simple.value),
-                PCRE2_UTF,
-                &errcode,
-                &erroffset,
-                NULL
-            );
+                if (!cached) {
+                    return 0;
+                }
 
-            if (!re) {
-                return 0;
+                int rc = pcre2_match(
+                    cached->compiled,
+                    (PCRE2_SPTR)Z_STRVAL_P(current_value),
+                    Z_STRLEN_P(current_value),
+                    0,
+                    0,
+                    cached->match_data,
+                    NULL
+                );
+
+                return rc >= 0;
+            } else {
+                /* Fallback: compile without caching */
+                pcre2_code *re;
+                PCRE2_SIZE erroffset;
+                int errcode;
+
+                re = pcre2_compile(
+                    (PCRE2_SPTR)Z_STRVAL(cond->simple.value),
+                    Z_STRLEN(cond->simple.value),
+                    PCRE2_UTF,
+                    &errcode,
+                    &erroffset,
+                    NULL
+                );
+
+                if (!re) {
+                    return 0;
+                }
+
+                pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(re, NULL);
+                int rc = pcre2_match(
+                    re,
+                    (PCRE2_SPTR)Z_STRVAL_P(current_value),
+                    Z_STRLEN_P(current_value),
+                    0,
+                    0,
+                    match_data,
+                    NULL
+                );
+
+                pcre2_match_data_free(match_data);
+                pcre2_code_free(re);
+
+                return rc >= 0;
             }
-
-            pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(re, NULL);
-            int rc = pcre2_match(
-                re,
-                (PCRE2_SPTR)Z_STRVAL_P(current_value),
-                Z_STRLEN_P(current_value),
-                0,
-                0,
-                match_data,
-                NULL
-            );
-
-            pcre2_match_data_free(match_data);
-            pcre2_code_free(re);
-
-            return rc >= 0;
         }
 
         case SUBJECT_OTHER_FIELD: {
@@ -330,49 +380,87 @@ static zend_bool evaluate_simple_condition(
         }
     }
 
-    /* Apply operator */
+    /* Apply operator - handle NULL subject_ptr safely */
+    zend_bool result = 0;
+
     switch (cond->simple.op) {
         case COND_OP_EQ:
-            return compare_zvals(subject_ptr, &cond->simple.value) == 0;
+            if (!subject_ptr) {
+                /* NULL equals NULL */
+                result = Z_TYPE(cond->simple.value) == IS_NULL;
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) == 0;
+            }
+            break;
 
         case COND_OP_NEQ:
-            return compare_zvals(subject_ptr, &cond->simple.value) != 0;
+            if (!subject_ptr) {
+                result = Z_TYPE(cond->simple.value) != IS_NULL;
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) != 0;
+            }
+            break;
 
         case COND_OP_GT:
-            return compare_zvals(subject_ptr, &cond->simple.value) > 0;
+            if (!subject_ptr) {
+                result = 0; /* NULL is not greater than anything */
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) > 0;
+            }
+            break;
 
         case COND_OP_GTE:
-            return compare_zvals(subject_ptr, &cond->simple.value) >= 0;
+            if (!subject_ptr) {
+                result = Z_TYPE(cond->simple.value) == IS_NULL;
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) >= 0;
+            }
+            break;
 
         case COND_OP_LT:
-            return compare_zvals(subject_ptr, &cond->simple.value) < 0;
+            if (!subject_ptr) {
+                result = Z_TYPE(cond->simple.value) != IS_NULL;
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) < 0;
+            }
+            break;
 
         case COND_OP_LTE:
-            return compare_zvals(subject_ptr, &cond->simple.value) <= 0;
+            if (!subject_ptr) {
+                result = 1; /* NULL is less than or equal to everything */
+            } else {
+                result = compare_zvals(subject_ptr, &cond->simple.value) <= 0;
+            }
+            break;
 
         case COND_OP_IN:
-            return value_in_array(subject_ptr, &cond->simple.value);
+            result = value_in_array(subject_ptr, &cond->simple.value);
+            break;
 
         case COND_OP_NOT_IN:
-            return !value_in_array(subject_ptr, &cond->simple.value);
+            result = !value_in_array(subject_ptr, &cond->simple.value);
+            break;
 
         case COND_OP_FILLED:
-            return sf_is_filled(subject_ptr);
+            result = sf_is_filled(subject_ptr);
+            break;
 
         case COND_OP_EMPTY:
-            return sf_is_empty(subject_ptr);
+            result = sf_is_empty(subject_ptr);
+            break;
 
         case COND_OP_MATCHES:
             /* Already handled above for self-referential */
+            result = 0;
             break;
     }
 
     /* Cleanup temporary values */
-    if (cond->simple.subject == SUBJECT_SELF_TYPE) {
+    if (needs_cleanup && Z_TYPE(subject_value) != IS_UNDEF) {
         zval_ptr_dtor(&subject_value);
     }
 
-    return 0;
+    return result;
 }
 
 /* Evaluate a condition */

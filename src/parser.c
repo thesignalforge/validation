@@ -1,11 +1,28 @@
 /*
  * Rule array parser
+ *
+ * This module parses PHP array rule definitions into optimized C structures
+ * for efficient validation. The parsing happens once at Validator construction
+ * time, so validation itself is a fast traversal of pre-parsed rules.
+ *
+ * Rule syntax supported:
+ * - Simple rules: 'required', 'email', etc.
+ * - Parameterized rules: ['min', 5], ['between', 1, 10]
+ * - Conditional rules: ['when', condition, then_rules, else_rules]
  */
 
 #include "parser.h"
 #include "condition.h"
 
-/* Rule name lookup table */
+/*
+ * Rule name to type mapping table.
+ *
+ * This table is used for O(n) lookup during parsing. While a hash table would
+ * be O(1), the small size of this table (< 50 entries) makes linear search
+ * competitive due to cache locality and no hash computation overhead.
+ *
+ * Rules are grouped by category for maintainability.
+ */
 typedef struct {
     const char *name;
     size_t len;
@@ -13,20 +30,20 @@ typedef struct {
 } sf_rule_lookup_t;
 
 static const sf_rule_lookup_t rule_lookup[] = {
-    /* Presence rules */
+    /* Presence rules - check field existence and emptiness */
     {"required", 8, RULE_REQUIRED},
     {"nullable", 8, RULE_NULLABLE},
     {"filled", 6, RULE_FILLED},
     {"present", 7, RULE_PRESENT},
 
-    /* Type rules */
+    /* Type rules - validate PHP type */
     {"string", 6, RULE_STRING},
     {"integer", 7, RULE_INTEGER},
     {"numeric", 7, RULE_NUMERIC},
     {"boolean", 7, RULE_BOOLEAN},
     {"array", 5, RULE_ARRAY},
 
-    /* String rules */
+    /* String rules - length and content validation */
     {"min", 3, RULE_MIN},
     {"max", 3, RULE_MAX},
     {"between", 7, RULE_BETWEEN},
@@ -41,7 +58,7 @@ static const sf_rule_lookup_t rule_lookup[] = {
     {"ends_with", 9, RULE_ENDS_WITH},
     {"contains", 8, RULE_CONTAINS},
 
-    /* Numeric rules */
+    /* Numeric rules - value comparison */
     {"gt", 2, RULE_GT},
     {"gte", 3, RULE_GTE},
     {"lt", 2, RULE_LT},
@@ -50,7 +67,7 @@ static const sf_rule_lookup_t rule_lookup[] = {
     /* Array rules */
     {"distinct", 8, RULE_DISTINCT},
 
-    /* Format rules */
+    /* Format rules - structured data validation */
     {"email", 5, RULE_EMAIL},
     {"url", 3, RULE_URL},
     {"ip", 2, RULE_IP},
@@ -63,22 +80,23 @@ static const sf_rule_lookup_t rule_lookup[] = {
     {"after_or_equal", 14, RULE_AFTER_OR_EQUAL},
     {"before_or_equal", 15, RULE_BEFORE_OR_EQUAL},
 
-    /* Comparison rules */
+    /* Comparison rules - cross-field validation */
     {"in", 2, RULE_IN},
     {"not_in", 6, RULE_NOT_IN},
     {"same", 4, RULE_SAME},
     {"different", 9, RULE_DIFFERENT},
     {"confirmed", 9, RULE_CONFIRMED},
 
-    /* Regional rules */
+    /* Regional rules - locale-specific formats */
     {"oib", 3, RULE_OIB},
     {"phone", 5, RULE_PHONE},
     {"iban", 4, RULE_IBAN},
     {"vat_eu", 6, RULE_VAT_EU},
 
-    /* Conditional */
+    /* Conditional - dynamic rule application */
     {"when", 4, RULE_WHEN},
 
+    /* Sentinel - marks end of table */
     {NULL, 0, RULE_UNKNOWN}
 };
 
@@ -363,16 +381,52 @@ HashTable *sf_parse_rules(HashTable *rules_array)
             return NULL;
         }
 
-        /* Validate field name */
+        /* Check field name length to prevent resource exhaustion */
+        if (ZSTR_LEN(field_name) == 0) {
+            zend_throw_exception_ex(signalforge_invalid_rule_exception_ce, 0,
+                "Field name cannot be empty");
+            sf_free_parsed_rules_ht(parsed_rules);
+            return NULL;
+        }
+
+        if (ZSTR_LEN(field_name) > SF_FIELD_NAME_MAX_LENGTH) {
+            zend_throw_exception_ex(signalforge_invalid_rule_exception_ce, 0,
+                "Field name exceeds maximum length of %d characters",
+                SF_FIELD_NAME_MAX_LENGTH);
+            sf_free_parsed_rules_ht(parsed_rules);
+            return NULL;
+        }
+
+        /* Validate field name characters */
         if (!sf_validate_rule_name(ZSTR_VAL(field_name), ZSTR_LEN(field_name))) {
             /* Allow dot notation for nested fields: items.*.name */
             const char *p = ZSTR_VAL(field_name);
             size_t len = ZSTR_LEN(field_name);
             zend_bool valid = 1;
 
-            for (size_t i = 0; i < len && valid; i++) {
+            /* First character must be a letter or underscore (not digit, dot, or asterisk) */
+            if (len > 0) {
+                char first = p[0];
+                if (!((first >= 'a' && first <= 'z') || first == '_')) {
+                    valid = 0;
+                }
+            }
+
+            for (size_t i = 1; i < len && valid; i++) {
                 char c = p[i];
                 if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '*')) {
+                    valid = 0;
+                }
+            }
+
+            /* Don't allow consecutive dots or ending with dot */
+            if (valid && len > 1) {
+                for (size_t i = 1; i < len && valid; i++) {
+                    if (p[i] == '.' && p[i-1] == '.') {
+                        valid = 0;
+                    }
+                }
+                if (p[len-1] == '.') {
                     valid = 0;
                 }
             }

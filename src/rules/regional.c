@@ -6,10 +6,15 @@
 #include "src/condition.h"
 #include <ctype.h>
 
-/* Croatian OIB validation - ISO 7064, MOD 11-10 */
+/*
+ * Croatian OIB (Osobni identifikacijski broj) validation.
+ *
+ * OIB is an 11-digit personal identification number used in Croatia.
+ * Validation uses the ISO 7064, MOD 11-10 checksum algorithm.
+ */
 static zend_bool validate_oib(const char *oib, size_t len)
 {
-    if (len != 11) {
+    if (len != SF_OIB_LENGTH) {
         return 0;
     }
 
@@ -54,10 +59,16 @@ sf_rule_result_t sf_rule_oib(sf_validation_context_t *ctx, sf_parsed_rule_t *rul
     return RULE_PASS;
 }
 
-/* Simple phone validation */
+/*
+ * Basic phone number validation.
+ *
+ * Validates structural format only - does not verify the number is dialable.
+ * Accepts digits, optional leading +, and common separators (space, dash, parens).
+ * Requires minimum 7 digits to be considered valid.
+ */
 static zend_bool validate_phone(const char *phone, size_t len)
 {
-    if (len < 7 || len > 20) {
+    if (len < SF_PHONE_MIN_DIGITS || len > SF_PHONE_MAX_LENGTH) {
         return 0;
     }
 
@@ -103,15 +114,29 @@ sf_rule_result_t sf_rule_phone(sf_validation_context_t *ctx, sf_parsed_rule_t *r
     return RULE_PASS;
 }
 
-/* IBAN validation - ISO 7064 MOD 97-10 */
+/*
+ * IBAN validation using ISO 7064 MOD 97-10 algorithm.
+ *
+ * The algorithm works by:
+ * 1. Moving the first 4 characters (country code + check digits) to the end
+ * 2. Converting letters to numbers (A=10, B=11, ..., Z=35)
+ * 3. Calculating MOD 97 of the resulting number
+ * 4. Valid if remainder equals 1
+ *
+ * Buffer sizing: Maximum IBAN is 34 chars. Each letter becomes 2 digits.
+ * Worst case: 34 letters = 68 digits + null = 69 bytes.
+ * We use 80 bytes for safety margin.
+ */
+#define IBAN_NUMERIC_BUFFER_SIZE 80
+
 static zend_bool validate_iban(const char *iban, size_t len)
 {
-    if (len < 15 || len > 34) {
+    if (len < SF_IBAN_MIN_LENGTH || len > SF_IBAN_MAX_LENGTH) {
         return 0;
     }
 
     /* Convert to numeric string (letters A-Z become 10-35) */
-    char numeric[128];
+    char numeric[IBAN_NUMERIC_BUFFER_SIZE];
     size_t numeric_len = 0;
 
     /* Move first 4 characters to end for validation */
@@ -119,8 +144,20 @@ static zend_bool validate_iban(const char *iban, size_t len)
         char c = toupper((unsigned char)iban[i]);
         if (c >= 'A' && c <= 'Z') {
             int val = c - 'A' + 10;
-            numeric_len += snprintf(numeric + numeric_len, sizeof(numeric) - numeric_len, "%d", val);
+            /* Each letter becomes at most 2 digits */
+            if (numeric_len + 2 >= IBAN_NUMERIC_BUFFER_SIZE) {
+                return 0; /* Buffer would overflow */
+            }
+            int written = snprintf(numeric + numeric_len,
+                IBAN_NUMERIC_BUFFER_SIZE - numeric_len, "%d", val);
+            if (written < 0 || (size_t)written >= IBAN_NUMERIC_BUFFER_SIZE - numeric_len) {
+                return 0;
+            }
+            numeric_len += (size_t)written;
         } else if (c >= '0' && c <= '9') {
+            if (numeric_len + 1 >= IBAN_NUMERIC_BUFFER_SIZE) {
+                return 0;
+            }
             numeric[numeric_len++] = c;
         } else if (c != ' ') {
             return 0;  /* Invalid character */
@@ -132,8 +169,19 @@ static zend_bool validate_iban(const char *iban, size_t len)
         char c = toupper((unsigned char)iban[i]);
         if (c >= 'A' && c <= 'Z') {
             int val = c - 'A' + 10;
-            numeric_len += snprintf(numeric + numeric_len, sizeof(numeric) - numeric_len, "%d", val);
+            if (numeric_len + 2 >= IBAN_NUMERIC_BUFFER_SIZE) {
+                return 0;
+            }
+            int written = snprintf(numeric + numeric_len,
+                IBAN_NUMERIC_BUFFER_SIZE - numeric_len, "%d", val);
+            if (written < 0 || (size_t)written >= IBAN_NUMERIC_BUFFER_SIZE - numeric_len) {
+                return 0;
+            }
+            numeric_len += (size_t)written;
         } else if (c >= '0' && c <= '9') {
+            if (numeric_len + 1 >= IBAN_NUMERIC_BUFFER_SIZE) {
+                return 0;
+            }
             numeric[numeric_len++] = c;
         } else {
             return 0;
@@ -141,7 +189,7 @@ static zend_bool validate_iban(const char *iban, size_t len)
     }
     numeric[numeric_len] = '\0';
 
-    /* Calculate MOD 97 */
+    /* Calculate MOD 97 using iterative approach to avoid big integer math */
     int remainder = 0;
     for (size_t i = 0; i < numeric_len; i++) {
         remainder = (remainder * 10 + (numeric[i] - '0')) % 97;
@@ -170,10 +218,16 @@ sf_rule_result_t sf_rule_iban(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     return RULE_PASS;
 }
 
-/* EU VAT number validation */
+/*
+ * EU VAT number format validation.
+ *
+ * Validates that the number has a 2-letter country code prefix followed
+ * by alphanumeric characters. Does not validate against VIES database
+ * or check country-specific formats.
+ */
 static zend_bool validate_vat_eu(const char *vat, size_t len)
 {
-    if (len < 4 || len > 14) {
+    if (len < SF_VAT_EU_MIN_LENGTH || len > SF_VAT_EU_MAX_LENGTH) {
         return 0;
     }
 

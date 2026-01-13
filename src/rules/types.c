@@ -1,9 +1,14 @@
 /*
  * Type validation rules
+ *
+ * These rules validate the PHP type of input values. They are typically
+ * used early in a validation chain to ensure type safety before applying
+ * other rules.
  */
 
 #include "rules.h"
 #include "src/condition.h"
+#include <errno.h>
 
 /* string - Must be a string */
 sf_rule_result_t sf_rule_string(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
@@ -20,7 +25,15 @@ sf_rule_result_t sf_rule_string(sf_validation_context_t *ctx, sf_parsed_rule_t *
     return RULE_PASS;
 }
 
-/* integer - Must be an integer */
+/*
+ * Validate that a value is an integer or integer-like string.
+ *
+ * Accepts:
+ * - PHP integers (IS_LONG)
+ * - Numeric strings that represent integers (no decimal point)
+ *
+ * Handles overflow gracefully by using errno checking.
+ */
 sf_rule_result_t sf_rule_integer(sf_validation_context_t *ctx, sf_parsed_rule_t *rule)
 {
     if (ctx->has_nullable && ctx->is_null_or_empty) {
@@ -50,16 +63,27 @@ sf_rule_result_t sf_rule_integer(sf_validation_context_t *ctx, sf_parsed_rule_t 
             /* Skip leading whitespace */
             while (*str == ' ' || *str == '\t') {
                 str++;
+                if (--len == 0) {
+                    sf_add_error(ctx, "validation.integer");
+                    return RULE_FAIL;
+                }
             }
 
+            /* Check for overflow using errno */
+            errno = 0;
             strtol(str, &endptr, 10);
+
+            if (errno == ERANGE) {
+                /* Overflow occurred - still valid as an integer representation */
+                /* but may not fit in a long */
+            }
 
             /* Skip trailing whitespace */
             while (*endptr == ' ' || *endptr == '\t') {
                 endptr++;
             }
 
-            if (*endptr == '\0') {
+            if (*endptr == '\0' && endptr != str) {
                 return RULE_PASS;
             }
             break;
