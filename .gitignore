@@ -1,9 +1,9 @@
 # phpize / autotools build artifacts
 .libs/
-Makefile
-Makefile.fragments
-Makefile.objects
-Makefile.global
+/Makefile
+/Makefile.fragments
+/Makefile.objects
+/Makefile.global
 autom4te.cache/
 build/
 config.h
