@@ -20,6 +20,7 @@
 
 /* Maximum recursion depth to prevent stack exhaustion */
 #define SF_MAX_WILDCARD_DEPTH 32
+#define SF_MAX_EXPANDED_FIELDS 100000
 
 /* Check if a field pattern contains wildcards */
 bool sf_has_wildcard(const char *pattern, size_t len)
@@ -125,6 +126,12 @@ static void expand_wildcards_recursive(
 {
     /* Prevent stack exhaustion from deeply nested structures */
     if (depth > SF_MAX_WILDCARD_DEPTH) {
+        return;
+    }
+
+    /* Prevent combinatorial explosion on broad wildcards
+     * (e.g., *.*.*.name with 100-element arrays at each level). */
+    if (zend_hash_num_elements(result) >= SF_MAX_EXPANDED_FIELDS) {
         return;
     }
 
