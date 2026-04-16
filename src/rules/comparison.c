@@ -7,7 +7,7 @@
 #include "src/wildcard.h"
 
 /* Compare two zvals for equality */
-static zend_bool values_equal(zval *a, zval *b)
+static bool values_equal(zval *a, zval *b)
 {
     if (!a || !b) {
         return (!a && !b);
@@ -34,7 +34,7 @@ sf_rule_result_t sf_rule_in(sf_validation_context_t *ctx, sf_parsed_rule_t *rule
 
     HashTable *values = rule->params.in_list.values;
     zval *item;
-    zend_bool found = 0;
+    bool found = 0;
 
     ZEND_HASH_FOREACH_VAL(values, item) {
         if (values_equal(ctx->value, item)) {
@@ -186,7 +186,7 @@ sf_rule_result_t sf_rule_confirmed(sf_validation_context_t *ctx, sf_parsed_rule_
         ctx->data
     );
 
-    zend_bool match = values_equal(ctx->value, confirmation_value);
+    bool match = values_equal(ctx->value, confirmation_value);
     efree(confirmation_field);
 
     if (!match) {

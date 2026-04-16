@@ -42,6 +42,21 @@
 #include <pcre2.h>
 
 /*
+ * PHP 8.5+ compat: zend_register_internal_class() is deprecated
+ */
+#if PHP_VERSION_ID >= 80500
+#define SF_REGISTER_CLASS(ce) \
+    zend_register_internal_class_with_flags((ce), NULL, 0)
+#define SF_REGISTER_CLASS_EX(ce, parent) \
+    zend_register_internal_class_with_flags((ce), (parent), 0)
+#else
+#define SF_REGISTER_CLASS(ce) \
+    zend_register_internal_class((ce))
+#define SF_REGISTER_CLASS_EX(ce, parent) \
+    zend_register_internal_class_ex((ce), (parent))
+#endif
+
+/*
  * Extension metadata constants
  */
 #define PHP_SIGNALFORGE_VALIDATION_VERSION "1.0.0"
@@ -114,7 +129,7 @@ typedef struct {
 
 /* Result object */
 typedef struct {
-    zend_bool is_valid;
+    bool is_valid;
     HashTable *errors;
     HashTable *validated;
     zend_object std;

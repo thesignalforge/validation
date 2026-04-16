@@ -212,41 +212,19 @@ static void validate_field(
     }
 
     /* Execute each rule */
-    zend_bool has_error = 0;
+    bool has_error = 0;
     for (size_t i = 0; i < field_rules->rule_count; i++) {
         sf_parsed_rule_t *rule = field_rules->rules[i];
 
-        /* Handle conditional rules */
+        /* Handle conditional rules via the shared helper so nested when
+         * rules (when-inside-then) actually execute. */
         if (rule->type == RULE_WHEN) {
-            zend_bool condition_met = sf_evaluate_condition(
-                rule->params.conditional.condition,
-                value,
-                data,
-                actual_field_name,
-                validator
-            );
-
-            sf_parsed_rule_t **rules_to_apply;
-            size_t rules_count;
-
-            if (condition_met) {
-                rules_to_apply = rule->params.conditional.then_rules;
-                rules_count = rule->params.conditional.then_count;
-            } else {
-                rules_to_apply = rule->params.conditional.else_rules;
-                rules_count = rule->params.conditional.else_count;
-            }
-
-            if (rules_to_apply) {
-                for (size_t j = 0; j < rules_count; j++) {
-                    sf_rule_result_t result = sf_execute_rule(&ctx, rules_to_apply[j]);
-                    if (result == RULE_FAIL) {
-                        has_error = 1;
-                        if (ctx.bail) break;
-                    } else if (result == RULE_SKIP) {
-                        break;
-                    }
-                }
+            sf_rule_result_t wresult = sf_execute_conditional(&ctx, rule, 0);
+            if (wresult == RULE_FAIL) {
+                has_error = 1;
+                if (ctx.bail) break;
+            } else if (wresult == RULE_SKIP) {
+                break;
             }
             continue;
         }
@@ -265,7 +243,14 @@ static void validate_field(
         zend_string *key = zend_string_init(actual_field_name, actual_field_len, 0);
         zval copy;
         ZVAL_COPY(&copy, value);
-        zend_hash_add(validated, key, &copy);
+
+        /* On duplicate key (wildcard expansion can produce overlapping paths
+         * via reference cycles in input data), zend_hash_add returns NULL
+         * and `copy` would leak. (audit #31) */
+        if (zend_hash_add(validated, key, &copy) == NULL) {
+            zval_ptr_dtor(&copy);
+        }
+
         zend_string_release(key);
     }
 }
@@ -284,6 +269,15 @@ PHP_METHOD(Validator, __construct)
     ZEND_PARSE_PARAMETERS_END();
 
     signalforge_validator_t *intern = Z_SIGNALFORGE_VALIDATOR_P(ZEND_THIS);
+
+    /* Free any existing rules — userland can call __construct() twice (or
+     * extension-loaded classes get re-constructed via reflection). Without
+     * this, the previously parsed rules HashTable, all field rules, all
+     * parsed_rule structs, and condition trees would leak. */
+    if (intern->rules) {
+        sf_free_parsed_rules_ht(intern->rules);
+        intern->rules = NULL;
+    }
 
     /* Parse rules */
     intern->rules = sf_parse_rules(rules_array);
@@ -684,7 +678,7 @@ void signalforge_register_validator_class(void)
 {
     zend_class_entry ce;
     INIT_NS_CLASS_ENTRY(ce, "Signalforge\\Validation", "Validator", validator_methods);
-    signalforge_validator_ce = zend_register_internal_class(&ce);
+    signalforge_validator_ce = SF_REGISTER_CLASS(&ce);
     signalforge_validator_ce->create_object = signalforge_validator_create;
 
     memcpy(&signalforge_validator_handlers, &std_object_handlers, sizeof(zend_object_handlers));
@@ -698,5 +692,5 @@ void signalforge_register_exception_class(void)
 {
     zend_class_entry ce;
     INIT_NS_CLASS_ENTRY(ce, "Signalforge\\Validation", "InvalidRuleException", NULL);
-    signalforge_invalid_rule_exception_ce = zend_register_internal_class_ex(&ce, zend_ce_exception);
+    signalforge_invalid_rule_exception_ce = SF_REGISTER_CLASS_EX(&ce, zend_ce_exception);
 }

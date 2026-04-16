@@ -202,7 +202,7 @@ void signalforge_register_result_class(void)
 {
     zend_class_entry ce;
     INIT_NS_CLASS_ENTRY(ce, "Signalforge\\Validation", "ValidationResult", validation_result_methods);
-    signalforge_validation_result_ce = zend_register_internal_class(&ce);
+    signalforge_validation_result_ce = SF_REGISTER_CLASS(&ce);
     signalforge_validation_result_ce->create_object = signalforge_validation_result_create;
 
     memcpy(&signalforge_validation_result_handlers, &std_object_handlers, sizeof(zend_object_handlers));

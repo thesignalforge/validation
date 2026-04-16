@@ -22,7 +22,7 @@
  * - Local part: 64 characters
  * - Domain: 253 characters
  */
-static zend_bool validate_email_fast(const char *email, size_t len)
+static bool validate_email_fast(const char *email, size_t len)
 {
     if (len < SF_EMAIL_MIN_LENGTH || len > SF_EMAIL_MAX_LENGTH) {
         return 0;
@@ -289,6 +289,7 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
      * This function is atomic and returns bool directly.
      */
     zval func_name, retval, params[1];
+    ZVAL_UNDEF(&retval);  /* must init before call_user_function — see audit #17 */
     ZVAL_STRING(&func_name, "json_validate");
     ZVAL_STRINGL(&params[0], Z_STRVAL_P(ctx->value), Z_STRLEN_P(ctx->value));
 
@@ -303,7 +304,7 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
         return RULE_FAIL;
     }
 
-    zend_bool is_valid = zval_is_true(&retval);
+    bool is_valid = zval_is_true(&retval);
     zval_ptr_dtor(&retval);
 
     if (!is_valid) {
@@ -319,6 +320,7 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
      * We catch the exception to determine validity.
      */
     zval func_name, retval, params[4];
+    ZVAL_UNDEF(&retval);  /* must init before call_user_function — see audit #17 */
     ZVAL_STRING(&func_name, "json_decode");
     ZVAL_STRINGL(&params[0], Z_STRVAL_P(ctx->value), Z_STRLEN_P(ctx->value));
     ZVAL_NULL(&params[1]);      /* associative: null (default) */
@@ -336,7 +338,7 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
     zval_ptr_dtor(&retval);
 
     /* Check if JsonException was thrown */
-    zend_bool has_json_error = (EG(exception) != NULL);
+    bool has_json_error = (EG(exception) != NULL);
 
     if (has_json_error) {
         /* Clear the exception - we handle it as validation failure */
@@ -367,74 +369,6 @@ sf_rule_result_t sf_rule_json(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
  * Returns 1 on success, 0 on failure. If out_time is provided and
  * parsing succeeds, the Unix timestamp is stored there.
  */
-static zend_bool parse_date_with_format(const char *str, size_t len, const char *format, time_t *out_time)
-{
-    zval datetime_class, method_name, retval, params[2];
-    zend_class_entry *datetime_ce;
-
-    /* Get DateTime class entry */
-    datetime_ce = zend_lookup_class(zend_string_init("DateTime", sizeof("DateTime") - 1, 0));
-    if (!datetime_ce) {
-        return 0;
-    }
-
-    /* Call DateTime::createFromFormat($format, $str) */
-    ZVAL_STRING(&method_name, "createFromFormat");
-    ZVAL_STRING(&params[0], format);
-    ZVAL_STRINGL(&params[1], str, len);
-
-    zval class_zval;
-    ZVAL_STR(&class_zval, zend_string_init("DateTime", sizeof("DateTime") - 1, 0));
-
-    int result = call_user_function(NULL, NULL, &method_name, &retval, 2, params);
-
-    zval_ptr_dtor(&method_name);
-    zval_ptr_dtor(&params[0]);
-    zval_ptr_dtor(&params[1]);
-    zval_ptr_dtor(&class_zval);
-
-    /*
-     * DateTime::createFromFormat is a static method. We need to call it properly.
-     * Let's use zend_call_method_with_2_params instead.
-     */
-    if (result != SUCCESS || Z_TYPE(retval) == IS_FALSE) {
-        zval_ptr_dtor(&retval);
-        return 0;
-    }
-
-    /*
-     * Security: Check that the entire string was consumed.
-     * DateTime::createFromFormat allows partial matches. We verify by comparing
-     * the formatted output back to the original input.
-     *
-     * For example, "2024-01-01extra" would partially match "Y-m-d".
-     * We detect this by reformatting and comparing.
-     */
-    if (Z_TYPE(retval) == IS_OBJECT) {
-        zval format_method, formatted_retval, format_param;
-        ZVAL_STRING(&format_method, "format");
-        ZVAL_STRING(&format_param, format);
-
-        /* Get the timestamp if requested */
-        if (out_time) {
-            zval timestamp_method, timestamp_retval;
-            ZVAL_STRING(&timestamp_method, "getTimestamp");
-
-            if (call_user_function(NULL, &retval, &timestamp_method, &timestamp_retval, 0, NULL) == SUCCESS) {
-                *out_time = (time_t)zval_get_long(&timestamp_retval);
-                zval_ptr_dtor(&timestamp_retval);
-            }
-            zval_ptr_dtor(&timestamp_method);
-        }
-
-        zval_ptr_dtor(&format_method);
-        zval_ptr_dtor(&format_param);
-    }
-
-    zval_ptr_dtor(&retval);
-    return 1;
-}
-
 /*
  * Validate date using PHP's DateTime for portability.
  *
@@ -443,10 +377,14 @@ static zend_bool parse_date_with_format(const char *str, size_t len, const char 
  * 2. Verifies the entire string matches the format (prevents partial match bypass)
  * 3. Uses DateTime::getLastErrors() to detect parsing warnings
  */
-static zend_bool validate_date_php(const char *str, size_t len, const char *format)
+static bool validate_date_php(const char *str, size_t len, const char *format)
 {
     zval func_name, retval, params[2];
     zend_class_entry *datetime_ce;
+
+    /* Init retval — call_user_function may not initialize it on dispatch
+     * failure, and zval_ptr_dtor on uninitialized memory crashes. (audit #15) */
+    ZVAL_UNDEF(&retval);
 
     /* Look up DateTime class */
     zend_string *class_name = zend_string_init("DateTime", sizeof("DateTime") - 1, 0);
@@ -502,6 +440,9 @@ static zend_bool validate_date_php(const char *str, size_t len, const char *form
     if (Z_TYPE(retval) == IS_OBJECT) {
         zval errors_method, errors_retval;
 
+        /* Init retval to avoid crash on call dispatch failure (audit #15) */
+        ZVAL_UNDEF(&errors_retval);
+
         /* Call DateTime::getLastErrors() static method */
         zval errors_callable;
         array_init(&errors_callable);
@@ -540,7 +481,7 @@ static zend_bool validate_date_php(const char *str, size_t len, const char *form
  * Portability: Uses PHP's DateTime class instead of strptime()
  * which is not available on Windows.
  */
-static zend_bool parse_date_to_time(const char *str, size_t len, time_t *out_time)
+static bool parse_date_to_time(const char *str, size_t len, time_t *out_time)
 {
     /* Try common date formats */
     static const char *formats[] = {
@@ -551,39 +492,45 @@ static zend_bool parse_date_to_time(const char *str, size_t len, time_t *out_tim
     };
 
     for (const char **fmt = formats; *fmt != NULL; fmt++) {
-        if (validate_date_php(str, len, *fmt)) {
-            if (out_time) {
-                /* Parse again to get timestamp */
-                zval callable, retval, params[2];
-                array_init(&callable);
-                zval class_name, method_name;
-                ZVAL_STRING(&class_name, "DateTime");
-                ZVAL_STRING(&method_name, "createFromFormat");
-                add_next_index_zval(&callable, &class_name);
-                add_next_index_zval(&callable, &method_name);
+        if (!validate_date_php(str, len, *fmt)) {
+            continue;
+        }
 
-                ZVAL_STRING(&params[0], *fmt);
-                ZVAL_STRINGL(&params[1], str, len);
-
-                if (call_user_function(NULL, NULL, &callable, &retval, 2, params) == SUCCESS &&
-                    Z_TYPE(retval) == IS_OBJECT) {
-
-                    zval ts_method, ts_retval;
-                    ZVAL_STRING(&ts_method, "getTimestamp");
-                    if (call_user_function(NULL, &retval, &ts_method, &ts_retval, 0, NULL) == SUCCESS) {
-                        *out_time = (time_t)zval_get_long(&ts_retval);
-                        zval_ptr_dtor(&ts_retval);
-                    }
-                    zval_ptr_dtor(&ts_method);
-                }
-
-                zval_ptr_dtor(&callable);
-                zval_ptr_dtor(&params[0]);
-                zval_ptr_dtor(&params[1]);
-                zval_ptr_dtor(&retval);
-            }
+        if (!out_time) {
             return 1;
         }
+
+        /* Parse once more to extract the timestamp via DateTime::createFromFormat */
+        zval callable, retval, params[2];
+        ZVAL_UNDEF(&retval);  /* audit #15 — must init before call_user_function */
+        array_init(&callable);
+        zval class_name, method_name;
+        ZVAL_STRING(&class_name, "DateTime");
+        ZVAL_STRING(&method_name, "createFromFormat");
+        add_next_index_zval(&callable, &class_name);
+        add_next_index_zval(&callable, &method_name);
+
+        ZVAL_STRING(&params[0], *fmt);
+        ZVAL_STRINGL(&params[1], str, len);
+
+        if (call_user_function(NULL, NULL, &callable, &retval, 2, params) == SUCCESS &&
+            Z_TYPE(retval) == IS_OBJECT)
+        {
+            zval ts_method, ts_retval;
+            ZVAL_UNDEF(&ts_retval);  /* audit #15 */
+            ZVAL_STRING(&ts_method, "getTimestamp");
+            if (call_user_function(NULL, &retval, &ts_method, &ts_retval, 0, NULL) == SUCCESS) {
+                *out_time = (time_t)zval_get_long(&ts_retval);
+                zval_ptr_dtor(&ts_retval);
+            }
+            zval_ptr_dtor(&ts_method);
+        }
+
+        zval_ptr_dtor(&callable);
+        zval_ptr_dtor(&params[0]);
+        zval_ptr_dtor(&params[1]);
+        zval_ptr_dtor(&retval);
+        return 1;
     }
 
     return 0;
@@ -648,7 +595,7 @@ sf_rule_result_t sf_rule_date_format(sf_validation_context_t *ctx, sf_parsed_rul
  * Parse date from field value for date comparison rules.
  * Returns timestamp via out_time parameter.
  */
-static zend_bool parse_date(zval *value, time_t *result)
+static bool parse_date(zval *value, time_t *result)
 {
     if (!value || Z_TYPE_P(value) != IS_STRING) {
         return 0;

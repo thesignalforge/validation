@@ -22,7 +22,7 @@
 #define SF_MAX_WILDCARD_DEPTH 32
 
 /* Check if a field pattern contains wildcards */
-zend_bool sf_has_wildcard(const char *pattern, size_t len)
+bool sf_has_wildcard(const char *pattern, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
         if (pattern[i] == '*') {
@@ -136,7 +136,15 @@ static void expand_wildcards_recursive(
         entry->value = sf_get_nested_value(prefix, prefix_len, data);
 
         zend_string *key = zend_string_init(prefix, prefix_len, 0);
-        zend_hash_add_ptr(result, key, entry);
+
+        /* On duplicate key (e.g., reference cycles producing the same expanded
+         * path twice), zend_hash_add_ptr returns NULL. Without this check,
+         * `entry` and `entry->path` leak unboundedly. (audit #20) */
+        if (zend_hash_add_ptr(result, key, entry) == NULL) {
+            efree(entry->path);
+            efree(entry);
+        }
+
         zend_string_release(key);
         return;
     }
@@ -229,7 +237,13 @@ static void expand_wildcards_recursive(
                 entry->value = sf_get_nested_value(new_prefix, new_prefix_len, data);
 
                 zend_string *result_key = zend_string_init(new_prefix, new_prefix_len, 0);
-                zend_hash_add_ptr(result, result_key, entry);
+
+                /* Check for duplicate-key collision (audit #20) */
+                if (zend_hash_add_ptr(result, result_key, entry) == NULL) {
+                    efree(entry->path);
+                    efree(entry);
+                }
+
                 zend_string_release(result_key);
             }
         } ZEND_HASH_FOREACH_END();
@@ -281,7 +295,13 @@ HashTable *sf_expand_wildcards(const char *pattern, size_t pattern_len, HashTabl
         entry->value = sf_get_nested_value(pattern, pattern_len, data);
 
         zend_string *key = zend_string_init(pattern, pattern_len, 0);
-        zend_hash_add_ptr(result, key, entry);
+
+        /* Defensive: fresh hashtable, dup impossible — but keep consistent (audit #20) */
+        if (zend_hash_add_ptr(result, key, entry) == NULL) {
+            efree(entry->path);
+            efree(entry);
+        }
+
         zend_string_release(key);
     } else {
         expand_wildcards_recursive(pattern, pattern_len, data, "", 0, result, 0);

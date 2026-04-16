@@ -101,7 +101,7 @@ static const sf_rule_lookup_t rule_lookup[] = {
 };
 
 /* Validate rule name - must match pattern ^[a-z][a-z0-9_]*$ */
-zend_bool sf_validate_rule_name(const char *name, size_t len)
+bool sf_validate_rule_name(const char *name, size_t len)
 {
     if (len == 0 || len > RULE_NAME_MAX_LENGTH) {
         return 0;
@@ -440,7 +440,7 @@ HashTable *sf_parse_rules(HashTable *rules_array)
             /* Allow dot notation for nested fields: items.*.name */
             const char *p = ZSTR_VAL(field_name);
             size_t len = ZSTR_LEN(field_name);
-            zend_bool valid = 1;
+            bool valid = 1;
 
             /* First character must be a letter or underscore (not digit, dot, or asterisk) */
             if (len > 0) {

@@ -15,7 +15,7 @@ typedef struct {
 } sf_expanded_field_t;
 
 /* Check if a field pattern contains wildcards */
-zend_bool sf_has_wildcard(const char *pattern, size_t len);
+bool sf_has_wildcard(const char *pattern, size_t len);
 
 /* Expand wildcards in a field pattern against data
  * Returns a HashTable of sf_expanded_field_t pointers

@@ -6,7 +6,7 @@
 #include "src/condition.h"
 
 /* Get numeric value from zval */
-static zend_bool get_numeric_value(zval *value, double *result)
+static bool get_numeric_value(zval *value, double *result)
 {
     if (!value) return 0;
 

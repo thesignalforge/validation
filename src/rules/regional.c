@@ -12,7 +12,7 @@
  * OIB is an 11-digit personal identification number used in Croatia.
  * Validation uses the ISO 7064, MOD 11-10 checksum algorithm.
  */
-static zend_bool validate_oib(const char *oib, size_t len)
+static bool validate_oib(const char *oib, size_t len)
 {
     if (len != SF_OIB_LENGTH) {
         return 0;
@@ -66,14 +66,14 @@ sf_rule_result_t sf_rule_oib(sf_validation_context_t *ctx, sf_parsed_rule_t *rul
  * Accepts digits, optional leading +, and common separators (space, dash, parens).
  * Requires minimum 7 digits to be considered valid.
  */
-static zend_bool validate_phone(const char *phone, size_t len)
+static bool validate_phone(const char *phone, size_t len)
 {
     if (len < SF_PHONE_MIN_DIGITS || len > SF_PHONE_MAX_LENGTH) {
         return 0;
     }
 
     size_t digit_count = 0;
-    zend_bool has_plus = 0;
+    bool has_plus = 0;
 
     for (size_t i = 0; i < len; i++) {
         char c = phone[i];
@@ -129,7 +129,7 @@ sf_rule_result_t sf_rule_phone(sf_validation_context_t *ctx, sf_parsed_rule_t *r
  */
 #define IBAN_NUMERIC_BUFFER_SIZE 80
 
-static zend_bool validate_iban(const char *iban, size_t len)
+static bool validate_iban(const char *iban, size_t len)
 {
     if (len < SF_IBAN_MIN_LENGTH || len > SF_IBAN_MAX_LENGTH) {
         return 0;
@@ -225,7 +225,7 @@ sf_rule_result_t sf_rule_iban(sf_validation_context_t *ctx, sf_parsed_rule_t *ru
  * by alphanumeric characters. Does not validate against VIES database
  * or check country-specific formats.
  */
-static zend_bool validate_vat_eu(const char *vat, size_t len)
+static bool validate_vat_eu(const char *vat, size_t len)
 {
     if (len < SF_VAT_EU_MIN_LENGTH || len > SF_VAT_EU_MAX_LENGTH) {
         return 0;
@@ -268,6 +268,84 @@ sf_rule_result_t sf_rule_vat_eu(sf_validation_context_t *ctx, sf_parsed_rule_t *
     }
 
     return RULE_PASS;
+}
+
+/*
+ * Shared conditional (RULE_WHEN) handler. Evaluates the condition and
+ * recursively applies the then/else rule list. Used by both the top-level
+ * validator loop AND by sf_execute_rule when a when-rule appears inside a
+ * nested then/else branch — without this second path, nested conditionals
+ * silently PASS without executing (bug #8).
+ *
+ * Depth-bounded to protect against adversarial rule trees.
+ *
+ * Returns:
+ *   RULE_PASS if no inner rule failed (or the branch was empty)
+ *   RULE_FAIL if any inner rule failed
+ *   RULE_SKIP if an inner rule returned SKIP (propagate to outer loop)
+ */
+sf_rule_result_t sf_execute_conditional(
+    sf_validation_context_t *ctx,
+    sf_parsed_rule_t *rule,
+    unsigned int depth)
+{
+    if (depth > SF_MAX_CONDITION_EVAL_DEPTH) {
+        /* Fail safe — don't stack-overflow on pathological rule sets. */
+        sf_add_error(ctx, "validation.when.depth_exceeded");
+        return RULE_FAIL;
+    }
+
+    bool condition_met = sf_evaluate_condition(
+        rule->params.conditional.condition,
+        ctx->value,
+        ctx->data,
+        ctx->field_name,
+        ctx->validator
+    );
+
+    sf_parsed_rule_t **rules_to_apply;
+    size_t rules_count;
+
+    if (condition_met) {
+        rules_to_apply = rule->params.conditional.then_rules;
+        rules_count = rule->params.conditional.then_count;
+    } else {
+        rules_to_apply = rule->params.conditional.else_rules;
+        rules_count = rule->params.conditional.else_count;
+    }
+
+    if (!rules_to_apply) {
+        return RULE_PASS;
+    }
+
+    sf_rule_result_t branch_result = RULE_PASS;
+    for (size_t j = 0; j < rules_count; j++) {
+        sf_parsed_rule_t *inner = rules_to_apply[j];
+
+        /* Key fix: if the inner rule is itself a RULE_WHEN, we must recurse
+         * into sf_execute_conditional directly. Before this, the inner when
+         * hit the `case RULE_WHEN: return RULE_PASS` fallthrough and no inner
+         * rules ever ran. */
+        sf_rule_result_t r;
+        if (inner->type == RULE_WHEN) {
+            r = sf_execute_conditional(ctx, inner, depth + 1);
+        } else {
+            r = sf_execute_rule(ctx, inner);
+        }
+
+        if (r == RULE_FAIL) {
+            branch_result = RULE_FAIL;
+            if (ctx->bail) {
+                break;
+            }
+        } else if (r == RULE_SKIP) {
+            /* SKIP means "stop processing further rules in this chain" — we
+             * propagate so the outer loop can stop too. */
+            return RULE_SKIP;
+        }
+    }
+
+    return branch_result;
 }
 
 /* Rule dispatcher - execute a rule by type */
@@ -337,9 +415,13 @@ sf_rule_result_t sf_execute_rule(sf_validation_context_t *ctx, sf_parsed_rule_t 
         case RULE_IBAN:         return sf_rule_iban(ctx, rule);
         case RULE_VAT_EU:       return sf_rule_vat_eu(ctx, rule);
 
-        /* Conditional - handled in validator.c */
+        /* Conditional. Historically this returned RULE_PASS on the assumption
+         * that only the top-level validator loop ever saw RULE_WHEN — but
+         * nested when-in-then rule sets DO land here via recursion, and the
+         * old early-return silently dropped them. Delegate to the shared
+         * helper so nested conditionals actually execute. */
         case RULE_WHEN:
-            return RULE_PASS;
+            return sf_execute_conditional(ctx, rule, 1);
 
         default:
             return RULE_PASS;

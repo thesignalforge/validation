@@ -16,9 +16,9 @@ typedef struct {
     size_t field_len;
     zval *value;                 /* Current field value */
     HashTable *errors;           /* Errors hashtable to populate */
-    zend_bool has_nullable;      /* Whether nullable rule is present */
-    zend_bool is_null_or_empty;  /* Whether value is null or empty */
-    zend_bool bail;              /* Stop on first error */
+    bool has_nullable;      /* Whether nullable rule is present */
+    bool is_null_or_empty;  /* Whether value is null or empty */
+    bool bail;              /* Stop on first error */
 } sf_validation_context_t;
 
 /* Rule validation result */
@@ -99,5 +99,14 @@ sf_rule_result_t sf_rule_vat_eu(sf_validation_context_t *ctx, sf_parsed_rule_t *
 
 /* Dispatch function - execute a rule by type */
 sf_rule_result_t sf_execute_rule(sf_validation_context_t *ctx, sf_parsed_rule_t *rule);
+
+/* Shared handler for RULE_WHEN used by both the validator loop and recursive
+ * rule execution. Returns PASS if no inner rule failed, FAIL if any did,
+ * SKIP to stop processing further rules. */
+sf_rule_result_t sf_execute_conditional(
+    sf_validation_context_t *ctx,
+    sf_parsed_rule_t *rule,
+    unsigned int depth
+);
 
 #endif /* SIGNALFORGE_RULES_H */

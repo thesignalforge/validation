@@ -84,7 +84,7 @@ sf_condition_t *sf_parse_condition_with_depth(zval *condition_array, size_t dept
  * Security: Uses internal depth tracking to prevent stack overflow from
  * deeply nested conditions. Returns false (fails safe) if depth exceeded.
  */
-zend_bool sf_evaluate_condition(
+bool sf_evaluate_condition(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
@@ -95,7 +95,7 @@ zend_bool sf_evaluate_condition(
 /*
  * Internal evaluation function with explicit depth tracking.
  */
-zend_bool sf_evaluate_condition_with_depth(
+bool sf_evaluate_condition_with_depth(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
@@ -108,9 +108,9 @@ zend_bool sf_evaluate_condition_with_depth(
 void sf_free_condition(sf_condition_t *cond);
 
 /* Helper to check if a value is considered "filled" */
-zend_bool sf_is_filled(zval *value);
+bool sf_is_filled(zval *value);
 
 /* Helper to check if a value is considered "empty" */
-zend_bool sf_is_empty(zval *value);
+bool sf_is_empty(zval *value);
 
 #endif /* SIGNALFORGE_CONDITION_H */

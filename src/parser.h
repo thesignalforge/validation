@@ -149,7 +149,7 @@ void sf_free_parsed_rule(sf_parsed_rule_t *rule);
 void sf_free_parsed_rules_ht(HashTable *rules);
 
 /* Validate rule name */
-zend_bool sf_validate_rule_name(const char *name, size_t len);
+bool sf_validate_rule_name(const char *name, size_t len);
 
 /* Get rule type from string */
 sf_rule_type_t sf_get_rule_type(const char *name, size_t len);

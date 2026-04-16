@@ -23,7 +23,7 @@ size_t sf_utf8_strlen(const char *str, size_t byte_len)
 }
 
 /* Check if a string is valid UTF-8 */
-zend_bool sf_utf8_is_valid(const char *str, size_t byte_len)
+bool sf_utf8_is_valid(const char *str, size_t byte_len)
 {
     const unsigned char *p = (const unsigned char *)str;
     const unsigned char *end = p + byte_len;

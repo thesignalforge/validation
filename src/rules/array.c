@@ -22,7 +22,7 @@ sf_rule_result_t sf_rule_distinct(sf_validation_context_t *ctx, sf_parsed_rule_t
     zend_hash_init(&seen, zend_hash_num_elements(arr), NULL, NULL, 0);
 
     zval *item;
-    zend_bool has_duplicate = 0;
+    bool has_duplicate = 0;
 
     ZEND_HASH_FOREACH_VAL(arr, item) {
         /* Convert value to string for comparison */

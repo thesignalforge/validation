@@ -15,7 +15,7 @@
 #include "util/utf8.h"
 
 /* Check if a value is considered "empty" */
-zend_bool sf_is_empty(zval *value)
+bool sf_is_empty(zval *value)
 {
     if (value == NULL) {
         return 1;
@@ -49,7 +49,7 @@ zend_bool sf_is_empty(zval *value)
 }
 
 /* Check if a value is considered "filled" */
-zend_bool sf_is_filled(zval *value)
+bool sf_is_filled(zval *value)
 {
     return !sf_is_empty(value);
 }
@@ -238,7 +238,7 @@ static int compare_zvals(zval *a, zval *b)
 }
 
 /* Check if value is in array */
-static zend_bool value_in_array(zval *value, zval *array_val)
+static bool value_in_array(zval *value, zval *array_val)
 {
     if (Z_TYPE_P(array_val) != IS_ARRAY) {
         return 0;
@@ -266,7 +266,7 @@ static zend_bool value_in_array(zval *value, zval *array_val)
  * values. We track whether it needs cleanup with needs_cleanup flag to ensure
  * proper resource management.
  */
-static zend_bool evaluate_simple_condition(
+static bool evaluate_simple_condition(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
@@ -276,7 +276,7 @@ static zend_bool evaluate_simple_condition(
 {
     zval subject_value;
     zval *subject_ptr = NULL;
-    zend_bool needs_cleanup = 0; /* Track if subject_value needs zval_ptr_dtor */
+    bool needs_cleanup = 0; /* Track if subject_value needs zval_ptr_dtor */
 
     ZVAL_UNDEF(&subject_value);
 
@@ -410,7 +410,7 @@ static zend_bool evaluate_simple_condition(
     }
 
     /* Apply operator - handle NULL subject_ptr safely */
-    zend_bool result = 0;
+    bool result = 0;
 
     switch (cond->simple.op) {
         case COND_OP_EQ:
@@ -463,11 +463,19 @@ static zend_bool evaluate_simple_condition(
             break;
 
         case COND_OP_IN:
-            result = value_in_array(subject_ptr, &cond->simple.value);
+            if (!subject_ptr) {
+                result = 0;
+            } else {
+                result = value_in_array(subject_ptr, &cond->simple.value);
+            }
             break;
 
         case COND_OP_NOT_IN:
-            result = !value_in_array(subject_ptr, &cond->simple.value);
+            if (!subject_ptr) {
+                result = 1;
+            } else {
+                result = !value_in_array(subject_ptr, &cond->simple.value);
+            }
             break;
 
         case COND_OP_FILLED:
@@ -496,7 +504,7 @@ static zend_bool evaluate_simple_condition(
  * Evaluate a condition (public API).
  * Delegates to depth-tracking version starting at depth 0.
  */
-zend_bool sf_evaluate_condition(
+bool sf_evaluate_condition(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
@@ -514,7 +522,7 @@ zend_bool sf_evaluate_condition(
  * recursion depth. Returns 0 (fails safe) if depth exceeded - this means
  * conditional validation rules will not apply if conditions are too deep.
  */
-zend_bool sf_evaluate_condition_with_depth(
+bool sf_evaluate_condition_with_depth(
     sf_condition_t *cond,
     zval *current_value,
     HashTable *all_data,
