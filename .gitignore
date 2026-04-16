@@ -1,0 +1,45 @@
+# phpize / autotools build artifacts
+.libs/
+Makefile
+Makefile.fragments
+Makefile.objects
+Makefile.global
+autom4te.cache/
+build/
+config.h
+config.h.in
+config.log
+config.nice
+config.status
+configure
+configure.ac
+configure.ac~
+configure~
+config.h.in~
+libtool
+modules/
+run-tests.php
+mkinstalldirs
+install-sh
+missing
+ltmain.sh
+acinclude.m4
+aclocal.m4
+*.la
+*.lo
+*.dep
+*.loT
+*.o
+
+# test output logs
+php_test_results_*.txt
+tests/*.diff
+tests/*.exp
+tests/*.log
+tests/*.out
+tests/*.php
+tests/*.sh
+
+# local dev scratch
+local/
+benchmarks/
